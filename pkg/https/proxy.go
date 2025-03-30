@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"regexp"
 	"strings"
 	"syscall"
 	"time"
@@ -509,57 +510,36 @@ func newPrivacyConn(conn net.Conn, localIP net.IP) *privacyConn {
 }
 
 func (pc *privacyConn) Read(b []byte) (n int, err error) {
-	// If we have buffered data, return it first
-	if pc.readOffset < pc.writeOffset {
-		n = copy(b, pc.buffer[pc.readOffset:pc.writeOffset])
-		pc.readOffset += n
-		if pc.readOffset >= pc.writeOffset {
-			pc.readOffset = 0
-			pc.writeOffset = 0
-		}
-		return n, nil
-	}
-
-	// Read new data into buffer
-	n, err = pc.Conn.Read(pc.buffer)
+	n, err = pc.Conn.Read(b)
 	if err != nil {
 		return 0, err
 	}
 
 	// Process the data to remove any potential IP leaks
-	pc.writeOffset = pc.sanitizeBuffer(pc.buffer[:n])
+	content := string(b[:n])
+	content = pc.sanitizeContent(content)
 
-	// Copy processed data to output buffer
-	copied := copy(b, pc.buffer[:pc.writeOffset])
-	if copied < pc.writeOffset {
-		pc.readOffset = copied
-	} else {
-		pc.readOffset = 0
-		pc.writeOffset = 0
-	}
-	return copied, nil
+	// Copy back to the buffer
+	return copy(b, content), nil
 }
 
 func (pc *privacyConn) Write(b []byte) (n int, err error) {
-	// Copy data to buffer for processing
-	n = copy(pc.buffer, b)
-	if n == 0 {
-		return 0, nil
-	}
-
 	// Process the data to remove any potential IP leaks
-	processed := pc.sanitizeBuffer(pc.buffer[:n])
+	content := string(b)
+	content = pc.sanitizeContent(content)
 
 	// Write processed data
-	return pc.Conn.Write(pc.buffer[:processed])
+	return pc.Conn.Write([]byte(content))
 }
 
-func (pc *privacyConn) sanitizeBuffer(data []byte) int {
-	// Convert to string for easier processing
-	content := string(data)
-
-	// Remove any instances of the client IP
-	content = strings.ReplaceAll(content, pc.RemoteAddr().String(), "")
+func (pc *privacyConn) sanitizeContent(content string) string {
+	// Remove any instances of the client IP from the RemoteAddr
+	if addr := pc.RemoteAddr(); addr != nil {
+		host, _, _ := net.SplitHostPort(addr.String())
+		if host != "" {
+			content = strings.ReplaceAll(content, host, "")
+		}
+	}
 
 	// Remove common headers that might leak information
 	content = pc.removeHeader(content, "X-Forwarded-For")
@@ -577,8 +557,25 @@ func (pc *privacyConn) sanitizeBuffer(data []byte) int {
 	content = pc.removeHeader(content, "HTTP_VIA")
 	content = pc.removeHeader(content, "REMOTE_ADDR")
 
-	// Copy back to buffer
-	return copy(data, content)
+	// Remove any IP addresses in the content
+	ipv4Regex := `\b(?:\d{1,3}\.){3}\d{1,3}\b`
+	ipv6Regex := `\b(?:[0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}\b`
+
+	content = regexp.MustCompile(ipv4Regex).ReplaceAllStringFunc(content, func(ip string) string {
+		if ip != pc.localIP.String() {
+			return ""
+		}
+		return ip
+	})
+
+	content = regexp.MustCompile(ipv6Regex).ReplaceAllStringFunc(content, func(ip string) string {
+		if ip != pc.localIP.String() {
+			return ""
+		}
+		return ip
+	})
+
+	return content
 }
 
 func (pc *privacyConn) removeHeader(content, header string) string {
