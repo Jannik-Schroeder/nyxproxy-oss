@@ -285,35 +285,44 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	// Create the proxy handler
 	proxy := &httputil.ReverseProxy{
 		Director: func(req *http.Request) {
-			// Remove headers that could reveal client information
-			req.Header.Del("X-Forwarded-For")
-			req.Header.Del("X-Real-IP")
-			req.Header.Del("CF-Connecting-IP")
-			req.Header.Del("True-Client-IP")
-			req.Header.Del("X-Client-IP")
+			// Remove all existing headers that could reveal client information
+			req.Header = make(http.Header)
 
-			// Remove proxy-related headers
-			req.Header.Del("Via")
-			req.Header.Del("Forwarded")
-			req.Header.Del("Proxy-Connection")
+			// Set minimal required headers
+			req.Header.Set("User-Agent", "curl/8.7.1") // Set a generic User-Agent
+			req.Header.Set("Accept", "*/*")
 
-			// Set clean headers
-			req.Header.Set("X-Forwarded-For", p.localAddr.String())
+			// Set the Host header from the URL
+			req.Host = req.URL.Host
 
-			// Remove original RemoteAddr
+			// Clear sensitive fields
 			req.RemoteAddr = ""
+			req.RequestURI = ""
 		},
 		Transport: transport,
 		ModifyResponse: func(resp *http.Response) error {
-			// Remove server headers that might reveal information
-			resp.Header.Del("Server")
-			resp.Header.Del("X-Powered-By")
-			resp.Header.Del("Via")
+			// Create new headers to ensure complete control
+			newHeader := make(http.Header)
 
-			// Add privacy headers
-			resp.Header.Set("X-Content-Type-Options", "nosniff")
-			resp.Header.Set("X-Frame-Options", "DENY")
-			resp.Header.Set("Referrer-Policy", "no-referrer")
+			// Copy only safe headers
+			safeHeaders := []string{
+				"Content-Type",
+				"Content-Length",
+				"Date",
+				"Cache-Control",
+				"Expires",
+				"Last-Modified",
+				"ETag",
+			}
+
+			for _, h := range safeHeaders {
+				if v := resp.Header.Get(h); v != "" {
+					newHeader.Set(h, v)
+				}
+			}
+
+			// Replace all headers with our sanitized set
+			resp.Header = newHeader
 
 			return nil
 		},
