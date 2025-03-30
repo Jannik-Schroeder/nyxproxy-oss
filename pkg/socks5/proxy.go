@@ -28,18 +28,24 @@ func NewProxy(cfg *config.ProxyConfig) (*Proxy, error) {
 	resolver := &net.Resolver{
 		PreferGo: true, // Use pure Go resolver
 		Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
-			// Force the DNS query to use the correct IP version
+			// Select DNS servers based on protocol version
+			var dnsServers []string
 			if cfg.ProxyProtocol == 6 {
 				network = "udp6"
+				dnsServers = []string{
+					"[2001:4860:4860::8888]:53", // Google DNS IPv6
+					"[2606:4700:4700::1111]:53", // Cloudflare DNS IPv6
+					"[2620:fe::fe]:53",          // Quad9 DNS IPv6
+					"[2620:119:35::35]:53",      // OpenDNS IPv6
+				}
 			} else {
 				network = "udp4"
-			}
-			// Try multiple DNS servers in case one fails
-			dnsServers := []string{
-				"8.8.8.8:53",        // Google DNS
-				"1.1.1.1:53",        // Cloudflare DNS
-				"9.9.9.9:53",        // Quad9 DNS
-				"208.67.222.222:53", // OpenDNS
+				dnsServers = []string{
+					"8.8.8.8:53",        // Google DNS IPv4
+					"1.1.1.1:53",        // Cloudflare DNS IPv4
+					"9.9.9.9:53",        // Quad9 DNS IPv4
+					"208.67.222.222:53", // OpenDNS IPv4
+				}
 			}
 
 			var lastErr error
