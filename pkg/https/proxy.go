@@ -300,6 +300,17 @@ func (p *Proxy) handleConnect(w http.ResponseWriter, r *http.Request) {
 
 // handleHTTP handles regular HTTP requests
 func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
+	fmt.Printf("\n=== Incoming Request Debug ===\n")
+	fmt.Printf("Original Request Headers:\n")
+	for k, v := range r.Header {
+		fmt.Printf("  %s: %v\n", k, v)
+	}
+	fmt.Printf("RemoteAddr: %s\n", r.RemoteAddr)
+	fmt.Printf("Method: %s\n", r.Method)
+	fmt.Printf("Host: %s\n", r.Host)
+	fmt.Printf("URL: %s\n", r.URL)
+	fmt.Printf("===========================\n")
+
 	// Ensure the request has a valid URL with scheme
 	if !strings.HasPrefix(r.URL.String(), "http://") && !strings.HasPrefix(r.URL.String(), "https://") {
 		r.URL, _ = url.Parse("http://" + r.Host + r.URL.String())
@@ -337,9 +348,22 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		newReq.Header.Set("Content-Length", r.Header.Get("Content-Length"))
 	}
 
+	fmt.Printf("\n=== Modified Request Debug ===\n")
+	fmt.Printf("New Request Headers:\n")
+	for k, v := range newReq.Header {
+		fmt.Printf("  %s: %v\n", k, v)
+	}
+	fmt.Printf("New RemoteAddr: %s\n", newReq.RemoteAddr)
+	fmt.Printf("===========================\n")
+
 	// Create custom transport with strict privacy settings
 	transport := &http.Transport{
 		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			fmt.Printf("\n=== Connection Debug ===\n")
+			fmt.Printf("Dialing: network=%s, addr=%s\n", network, addr)
+			fmt.Printf("Local IP: %s\n", p.localAddr.String())
+			fmt.Printf("Protocol: IPv%d\n", p.config.ProxyProtocol)
+
 			host, port, err := net.SplitHostPort(addr)
 			if err != nil {
 				return nil, fmt.Errorf("invalid address format: %v", err)
@@ -350,6 +374,7 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 			if err != nil {
 				return nil, err
 			}
+			fmt.Printf("Resolved IP: %s\n", resolvedIP)
 
 			// Create a dialer with strict privacy settings
 			dialer := &net.Dialer{
@@ -358,14 +383,19 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 				},
 				Control: func(network, address string, c syscall.RawConn) error {
 					return c.Control(func(fd uintptr) {
+						fmt.Printf("\n=== Socket Options Debug ===\n")
 						if p.config.ProxyProtocol == 6 {
 							// Force IPv6 only mode
-							syscall.SetsockoptInt(int(fd), syscall.IPPROTO_IPV6, syscall.IPV6_V6ONLY, 1)
+							err := syscall.SetsockoptInt(int(fd), syscall.IPPROTO_IPV6, syscall.IPV6_V6ONLY, 1)
+							fmt.Printf("Setting IPV6_V6ONLY=1: %v\n", err)
 							// Set traffic class to 0
-							syscall.SetsockoptInt(int(fd), syscall.IPPROTO_IPV6, syscall.IPV6_TCLASS, 0)
+							err = syscall.SetsockoptInt(int(fd), syscall.IPPROTO_IPV6, syscall.IPV6_TCLASS, 0)
+							fmt.Printf("Setting IPV6_TCLASS=0: %v\n", err)
 						}
 						// Set IP options to none
-						syscall.SetsockoptString(int(fd), syscall.IPPROTO_IP, syscall.IP_OPTIONS, "")
+						err := syscall.SetsockoptString(int(fd), syscall.IPPROTO_IP, syscall.IP_OPTIONS, "")
+						fmt.Printf("Setting IP_OPTIONS='': %v\n", err)
+						fmt.Printf("===========================\n")
 					})
 				},
 				Timeout:   30 * time.Second,
@@ -381,8 +411,11 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 			// Connect through our internal connection first
 			conn, err := dialer.DialContext(ctx, network, net.JoinHostPort(resolvedIP, port))
 			if err != nil {
+				fmt.Printf("Connection error: %v\n", err)
 				return nil, err
 			}
+			fmt.Printf("Connection established: %s -> %s\n", conn.LocalAddr(), conn.RemoteAddr())
+			fmt.Printf("===========================\n")
 
 			// Wrap the connection to prevent any potential information leakage
 			return &privacyConn{
@@ -391,8 +424,8 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 			}, nil
 		},
 		ForceAttemptHTTP2:     false,
-		DisableKeepAlives:     true, // Disable keep-alives to prevent connection reuse
-		DisableCompression:    true, // Disable compression to prevent fingerprinting
+		DisableKeepAlives:     true,
+		DisableCompression:    true,
 		MaxIdleConns:          100,
 		MaxIdleConnsPerHost:   10,
 		IdleConnTimeout:       90 * time.Second,
@@ -407,6 +440,12 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		},
 		Transport: transport,
 		ModifyResponse: func(resp *http.Response) error {
+			fmt.Printf("\n=== Response Debug ===\n")
+			fmt.Printf("Original Response Headers:\n")
+			for k, v := range resp.Header {
+				fmt.Printf("  %s: %v\n", k, v)
+			}
+
 			// Strip all existing headers
 			resp.Header = make(http.Header)
 
@@ -417,6 +456,12 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 			if ctype := resp.Header.Get("Content-Type"); ctype != "" {
 				resp.Header.Set("Content-Type", ctype)
 			}
+
+			fmt.Printf("\nModified Response Headers:\n")
+			for k, v := range resp.Header {
+				fmt.Printf("  %s: %v\n", k, v)
+			}
+			fmt.Printf("===========================\n")
 
 			return nil
 		},
