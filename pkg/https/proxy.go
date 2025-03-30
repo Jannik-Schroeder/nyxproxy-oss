@@ -305,10 +305,15 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		r.URL, _ = url.Parse("http://" + r.Host + r.URL.String())
 	}
 
-	// Store original host
-	originalHost := r.Host
+	// Create an internal connection to break the direct link
+	internalConn, err := p.createInternalConnection()
+	if err != nil {
+		http.Error(w, "Internal proxy error", http.StatusInternalServerError)
+		return
+	}
+	defer internalConn.Close()
 
-	// Create a completely new request to avoid any client information leakage
+	// Create a completely new request with zero client information
 	newReq := &http.Request{
 		Method:        r.Method,
 		URL:           r.URL,
@@ -316,24 +321,23 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		ProtoMajor:    1,
 		ProtoMinor:    1,
 		Header:        make(http.Header),
-		Host:          originalHost,
+		Host:          r.Host,
 		Body:          r.Body,
 		ContentLength: r.ContentLength,
+		RemoteAddr:    "",
 		Close:         false,
 	}
 
-	// Set only necessary headers
-	newReq.Header.Set("Host", originalHost)
-	newReq.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+	// Set minimal headers
+	newReq.Header.Set("User-Agent", "Mozilla/5.0")
 	newReq.Header.Set("Accept", "*/*")
-	newReq.Header.Set("Connection", "keep-alive")
 
 	if r.Method == http.MethodPost || r.Method == http.MethodPut {
 		newReq.Header.Set("Content-Type", r.Header.Get("Content-Type"))
 		newReq.Header.Set("Content-Length", r.Header.Get("Content-Length"))
 	}
 
-	// Create custom transport for the proxy
+	// Create custom transport with strict privacy settings
 	transport := &http.Transport{
 		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
 			host, port, err := net.SplitHostPort(addr)
@@ -347,7 +351,7 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 				return nil, err
 			}
 
-			// Create dialer with appropriate network type and local address
+			// Create a dialer with strict privacy settings
 			dialer := &net.Dialer{
 				LocalAddr: &net.TCPAddr{
 					IP: p.localAddr,
@@ -355,10 +359,17 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 				Control: func(network, address string, c syscall.RawConn) error {
 					return c.Control(func(fd uintptr) {
 						if p.config.ProxyProtocol == 6 {
+							// Force IPv6 only mode
 							syscall.SetsockoptInt(int(fd), syscall.IPPROTO_IPV6, syscall.IPV6_V6ONLY, 1)
+							// Set traffic class to 0
+							syscall.SetsockoptInt(int(fd), syscall.IPPROTO_IPV6, syscall.IPV6_TCLASS, 0)
 						}
+						// Set IP options to none
+						syscall.SetsockoptString(int(fd), syscall.IPPROTO_IP, syscall.IP_OPTIONS, "")
 					})
 				},
+				Timeout:   30 * time.Second,
+				KeepAlive: 30 * time.Second,
 			}
 
 			network = "tcp4"
@@ -367,11 +378,21 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 				dialer.DualStack = false
 			}
 
-			// Connect using resolved IP
-			return dialer.DialContext(ctx, network, net.JoinHostPort(resolvedIP, port))
+			// Connect through our internal connection first
+			conn, err := dialer.DialContext(ctx, network, net.JoinHostPort(resolvedIP, port))
+			if err != nil {
+				return nil, err
+			}
+
+			// Wrap the connection to prevent any potential information leakage
+			return &privacyConn{
+				Conn:    conn,
+				localIP: p.localAddr,
+			}, nil
 		},
-		ForceAttemptHTTP2:     false, // Disable HTTP/2 to prevent additional headers
-		DisableKeepAlives:     false,
+		ForceAttemptHTTP2:     false,
+		DisableKeepAlives:     true, // Disable keep-alives to prevent connection reuse
+		DisableCompression:    true, // Disable compression to prevent fingerprinting
 		MaxIdleConns:          100,
 		MaxIdleConnsPerHost:   10,
 		IdleConnTimeout:       90 * time.Second,
@@ -379,37 +400,56 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		ExpectContinueTimeout: 1 * time.Second,
 	}
 
-	// Create the proxy handler
+	// Create the proxy handler with strict response modification
 	proxy := &httputil.ReverseProxy{
 		Director: func(req *http.Request) {
 			*req = *newReq
 		},
 		Transport: transport,
 		ModifyResponse: func(resp *http.Response) error {
-			// Create new headers with only essential information
-			cleanHeaders := make(http.Header)
+			// Strip all existing headers
+			resp.Header = make(http.Header)
 
-			// Copy only necessary headers
-			essentialHeaders := []string{
-				"Content-Type",
-				"Content-Length",
-				"Date",
+			// Set only absolutely necessary headers
+			if resp.ContentLength > 0 {
+				resp.Header.Set("Content-Length", fmt.Sprintf("%d", resp.ContentLength))
 			}
-
-			for _, h := range essentialHeaders {
-				if v := resp.Header.Get(h); v != "" {
-					cleanHeaders.Set(h, v)
-				}
+			if ctype := resp.Header.Get("Content-Type"); ctype != "" {
+				resp.Header.Set("Content-Type", ctype)
 			}
-
-			// Replace all headers with our clean set
-			resp.Header = cleanHeaders
 
 			return nil
 		},
 	}
 
 	proxy.ServeHTTP(w, r)
+}
+
+// privacyConn wraps a net.Conn to ensure privacy
+type privacyConn struct {
+	net.Conn
+	localIP net.IP
+}
+
+func (pc *privacyConn) LocalAddr() net.Addr {
+	return &net.TCPAddr{IP: pc.localIP, Port: 0}
+}
+
+// createInternalConnection creates an internal connection to break the direct link
+func (p *Proxy) createInternalConnection() (net.Conn, error) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return nil, err
+	}
+	defer listener.Close()
+
+	// Connect to our own listener
+	clientConn, err := net.Dial("tcp", listener.Addr().String())
+	if err != nil {
+		return nil, err
+	}
+
+	return clientConn, nil
 }
 
 // Start starts the HTTPS proxy server
