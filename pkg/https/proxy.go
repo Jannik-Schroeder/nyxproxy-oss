@@ -9,6 +9,8 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"strings"
+	"syscall"
+	"time"
 
 	"github.com/phanes/nyxtrace/nyxproxy-core/internal/config"
 )
@@ -313,10 +315,20 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 				return nil, err
 			}
 
-			// Create dialer with appropriate network type
+			// Create dialer with appropriate network type and local address
 			dialer := &net.Dialer{
-				LocalAddr: &net.TCPAddr{IP: p.localAddr},
+				LocalAddr: &net.TCPAddr{
+					IP: p.localAddr,
+				},
+				Control: func(network, address string, c syscall.RawConn) error {
+					return c.Control(func(fd uintptr) {
+						if p.config.ProxyProtocol == 6 {
+							syscall.SetsockoptInt(int(fd), syscall.IPPROTO_IPV6, syscall.IPV6_V6ONLY, 1)
+						}
+					})
+				},
 			}
+
 			network = "tcp4"
 			if p.config.ProxyProtocol == 6 {
 				network = "tcp6"
@@ -326,9 +338,13 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 			// Connect using resolved IP
 			return dialer.DialContext(ctx, network, net.JoinHostPort(resolvedIP, port))
 		},
-		ForceAttemptHTTP2: false, // Disable HTTP/2 to prevent additional headers
-		DisableKeepAlives: false,
-		IdleConnTimeout:   30,
+		ForceAttemptHTTP2:     false, // Disable HTTP/2 to prevent additional headers
+		DisableKeepAlives:     false,
+		MaxIdleConns:          100,
+		MaxIdleConnsPerHost:   10,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
 	}
 
 	// Create the proxy handler
