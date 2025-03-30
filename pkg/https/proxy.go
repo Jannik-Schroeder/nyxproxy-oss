@@ -7,7 +7,6 @@ import (
 	"net"
 	"net/http"
 	"net/http/httputil"
-	"net/url"
 
 	"github.com/phanes/nyxtrace/nyxproxy-core/internal/config"
 )
@@ -108,14 +107,7 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	// Create the proxy handler
 	proxy := &httputil.ReverseProxy{
 		Director: func(req *http.Request) {
-			if p.config.UpstreamURL != "" {
-				target, err := url.Parse(p.config.UpstreamURL)
-				if err != nil {
-					return
-				}
-				req.URL.Scheme = target.Scheme
-				req.URL.Host = target.Host
-			}
+			// The URL is already properly set by the client's proxy request
 		},
 		Transport: transport,
 	}

@@ -15,8 +15,6 @@ type ProxyConfig struct {
 	ProxyProtocol int
 	// ProxyType defines the type of proxy (socks5 or https)
 	ProxyType string
-	// UpstreamURL is the URL of the upstream proxy (if any)
-	UpstreamURL string
 	// EnableLogging enables detailed logging
 	EnableLogging bool
 }
@@ -28,7 +26,6 @@ func LoadConfig() (*ProxyConfig, error) {
 		ListenPort:    getEnvAsIntOrDefault("PROXY_LISTEN_PORT", 8080),
 		ProxyProtocol: getEnvAsIntOrDefault("PROXY_PROTOCOL", 4), // 4 for IPv4, 6 for IPv6
 		ProxyType:     getEnvOrDefault("PROXY_TYPE", "socks5"),   // socks5 or https
-		UpstreamURL:   getEnvOrDefault("PROXY_UPSTREAM_URL", ""),
 		EnableLogging: getEnvAsBoolOrDefault("PROXY_ENABLE_LOGGING", true),
 	}
 

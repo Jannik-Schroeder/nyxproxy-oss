@@ -8,7 +8,6 @@ import (
 
 	"github.com/armon/go-socks5"
 	"github.com/phanes/nyxtrace/nyxproxy-core/internal/config"
-	"golang.org/x/net/proxy"
 )
 
 // Proxy represents a SOCKS5 proxy server
@@ -33,15 +32,6 @@ func NewProxy(cfg *config.ProxyConfig) (*Proxy, error) {
 				network = "tcp6"
 			} else {
 				network = "tcp4"
-			}
-
-			// If upstream proxy is configured, use it
-			if cfg.UpstreamURL != "" {
-				upstreamDialer, err := proxy.SOCKS5("tcp", cfg.UpstreamURL, nil, dialer)
-				if err != nil {
-					return nil, fmt.Errorf("failed to create upstream dialer: %v", err)
-				}
-				return upstreamDialer.Dial(network, addr)
 			}
 
 			return dialer.DialContext(ctx, network, addr)

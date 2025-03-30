@@ -8,7 +8,6 @@ A flexible proxy server that supports both SOCKS5 and HTTPS protocols, capable o
 - Accepts both IPv4 and IPv6 incoming connections
 - Can force outgoing connections to use either IPv4 or IPv6
 - Configurable through environment variables
-- Support for upstream proxies
 - Graceful shutdown handling
 
 ## Configuration
@@ -20,7 +19,6 @@ PROXY_LISTEN_ADDRESS=0.0.0.0     # Address to listen on (default: 0.0.0.0)
 PROXY_LISTEN_PORT=8080           # Port to listen on (default: 8080)
 PROXY_PROTOCOL=4                 # Outgoing protocol version (4 or 6, default: 4)
 PROXY_TYPE=socks5               # Proxy type (socks5 or https, default: socks5)
-PROXY_UPSTREAM_URL=             # Optional upstream proxy URL
 PROXY_ENABLE_LOGGING=true       # Enable detailed logging (default: true)
 ```
 
