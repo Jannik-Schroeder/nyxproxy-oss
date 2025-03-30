@@ -332,9 +332,10 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	newReq.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
 	newReq.Header.Set("Accept", "*/*")
 	newReq.Header.Set("Accept-Encoding", "identity")
-	newReq.Header.Set("X-Forwarded-For", p.localAddr.String())
-	newReq.Header.Set("X-Real-IP", p.localAddr.String())
-	newReq.Header.Set("Forwarded", "for="+p.localAddr.String())
+	// Remove all forwarding headers
+	newReq.Header.Del("X-Forwarded-For")
+	newReq.Header.Del("X-Real-IP")
+	newReq.Header.Del("Forwarded")
 	newReq.Header.Del("Via")
 	newReq.Header.Del("Proxy-Connection")
 	newReq.Header.Del("Connection")
@@ -368,9 +369,16 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 				return nil, fmt.Errorf("invalid address format: %v", err)
 			}
 
+			// Create an internal connection to break the direct link
+			internalConn, err := p.createInternalConnection()
+			if err != nil {
+				return nil, fmt.Errorf("failed to create internal connection: %v", err)
+			}
+
 			// Resolve the host to the correct IP version
 			resolvedIP, err := p.resolveHost(ctx, host)
 			if err != nil {
+				internalConn.Close()
 				return nil, err
 			}
 			fmt.Printf("Resolved IP: %s\n", resolvedIP)
@@ -410,13 +418,14 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 			// Connect through our internal connection first
 			conn, err := dialer.DialContext(ctx, network, net.JoinHostPort(resolvedIP, port))
 			if err != nil {
+				internalConn.Close()
 				fmt.Printf("Connection error: %v\n", err)
 				return nil, err
 			}
 			fmt.Printf("Connection established: %s -> %s\n", conn.LocalAddr(), conn.RemoteAddr())
 			fmt.Printf("===========================\n")
 
-			// Wrap the connection with our privacy layer
+			// Wrap both connections with our privacy layer
 			return &privacyConn{
 				Conn:    conn,
 				localIP: p.localAddr,
@@ -425,8 +434,8 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		ForceAttemptHTTP2:     false,
 		DisableKeepAlives:     true,
 		DisableCompression:    true,
-		MaxIdleConns:          -1, // Disable connection pooling
-		IdleConnTimeout:       -1, // Disable idle timeout
+		MaxIdleConns:          -1,
+		IdleConnTimeout:       -1,
 		ResponseHeaderTimeout: 30 * time.Second,
 		ExpectContinueTimeout: 1 * time.Second,
 	}
@@ -461,9 +470,12 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 			newHeaders.Set("X-XSS-Protection", "1; mode=block")
 			newHeaders.Set("Referrer-Policy", "no-referrer")
 			newHeaders.Set("Server", "")
-			newHeaders.Set("X-Forwarded-For", p.localAddr.String())
-			newHeaders.Set("X-Real-IP", p.localAddr.String())
-			newHeaders.Set("Forwarded", "for="+p.localAddr.String())
+
+			// Remove all forwarding headers
+			newHeaders.Del("X-Forwarded-For")
+			newHeaders.Del("X-Real-IP")
+			newHeaders.Del("Forwarded")
+			newHeaders.Del("Via")
 
 			// Replace all headers with our clean set
 			resp.Header = newHeaders
