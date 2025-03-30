@@ -494,42 +494,92 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 // privacyConn wraps a net.Conn to ensure privacy
 type privacyConn struct {
 	net.Conn
-	localIP     net.IP
-	remoteAddr  net.Addr
-	buffer      []byte
-	readOffset  int
-	writeOffset int
+	localIP    net.IP
+	remoteAddr net.Addr
 }
 
 func newPrivacyConn(conn net.Conn, localIP net.IP) *privacyConn {
 	return &privacyConn{
 		Conn:    conn,
 		localIP: localIP,
-		buffer:  make([]byte, 32*1024), // 32KB buffer
 	}
 }
 
 func (pc *privacyConn) Read(b []byte) (n int, err error) {
+	// Read from the underlying connection
 	n, err = pc.Conn.Read(b)
-	if err != nil {
-		return 0, err
+	if err != nil || n == 0 {
+		return n, err
+	}
+
+	// Only process if it looks like text data
+	if !isTextData(b[:n]) {
+		return n, nil
 	}
 
 	// Process the data to remove any potential IP leaks
 	content := string(b[:n])
 	content = pc.sanitizeContent(content)
 
-	// Copy back to the buffer
-	return copy(b, content), nil
+	// Copy back to the buffer, ensuring we don't exceed the buffer size
+	processed := []byte(content)
+	if len(processed) > len(b) {
+		processed = processed[:len(b)]
+	}
+	return copy(b, processed), nil
 }
 
 func (pc *privacyConn) Write(b []byte) (n int, err error) {
+	if len(b) == 0 {
+		return 0, nil
+	}
+
+	// Only process if it looks like text data
+	if !isTextData(b) {
+		return pc.Conn.Write(b)
+	}
+
 	// Process the data to remove any potential IP leaks
 	content := string(b)
 	content = pc.sanitizeContent(content)
 
 	// Write processed data
 	return pc.Conn.Write([]byte(content))
+}
+
+// isTextData checks if the data looks like text
+func isTextData(data []byte) bool {
+	if len(data) < 1 {
+		return false
+	}
+
+	// Look for HTTP header patterns
+	httpPatterns := []string{
+		"HTTP/",
+		"GET ",
+		"POST ",
+		"Host:",
+		"User-Agent:",
+		"Content-Type:",
+		"application/json",
+		"text/",
+	}
+
+	content := string(data)
+	for _, pattern := range httpPatterns {
+		if strings.Contains(content, pattern) {
+			return true
+		}
+	}
+
+	// Check if the content is mostly printable characters
+	printable := 0
+	for _, b := range data {
+		if (b >= 32 && b <= 126) || b == '\n' || b == '\r' || b == '\t' {
+			printable++
+		}
+	}
+	return float64(printable)/float64(len(data)) > 0.85
 }
 
 func (pc *privacyConn) sanitizeContent(content string) string {
@@ -558,21 +608,21 @@ func (pc *privacyConn) sanitizeContent(content string) string {
 	content = pc.removeHeader(content, "REMOTE_ADDR")
 
 	// Remove any IP addresses in the content
-	ipv4Regex := `\b(?:\d{1,3}\.){3}\d{1,3}\b`
-	ipv6Regex := `\b(?:[0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}\b`
+	ipv4Regex := regexp.MustCompile(`\b(?:\d{1,3}\.){3}\d{1,3}\b`)
+	ipv6Regex := regexp.MustCompile(`\b(?:[0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}\b`)
 
-	content = regexp.MustCompile(ipv4Regex).ReplaceAllStringFunc(content, func(ip string) string {
-		if ip != pc.localIP.String() {
-			return ""
+	content = ipv4Regex.ReplaceAllStringFunc(content, func(ip string) string {
+		if ip == pc.localIP.String() {
+			return ip
 		}
-		return ip
+		return ""
 	})
 
-	content = regexp.MustCompile(ipv6Regex).ReplaceAllStringFunc(content, func(ip string) string {
-		if ip != pc.localIP.String() {
-			return ""
+	content = ipv6Regex.ReplaceAllStringFunc(content, func(ip string) string {
+		if ip == pc.localIP.String() {
+			return ip
 		}
-		return ip
+		return ""
 	})
 
 	return content
