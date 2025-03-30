@@ -207,14 +207,40 @@ func (p *Proxy) handleConnect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Create custom dialer for the target connection
+	// Create custom dialer for the target connection with strict socket options
 	dialer := &net.Dialer{
-		LocalAddr: &net.TCPAddr{IP: p.localAddr},
+		LocalAddr: &net.TCPAddr{
+			IP: p.localAddr,
+		},
+		Control: func(network, address string, c syscall.RawConn) error {
+			var innerErr error
+			err := c.Control(func(fd uintptr) {
+				if p.config.ProxyProtocol == 6 {
+					// Force IPv6 only mode
+					if err := syscall.SetsockoptInt(int(fd), syscall.IPPROTO_IPV6, syscall.IPV6_V6ONLY, 1); err != nil {
+						innerErr = err
+						return
+					}
+					// Set IPv6 traffic class for better privacy
+					if err := syscall.SetsockoptInt(int(fd), syscall.IPPROTO_IPV6, syscall.IPV6_TCLASS, 0); err != nil {
+						innerErr = err
+						return
+					}
+				}
+			})
+			if err != nil {
+				return err
+			}
+			return innerErr
+		},
+		Timeout:   30 * time.Second,
+		KeepAlive: 30 * time.Second,
 	}
+
 	network := "tcp4"
 	if p.config.ProxyProtocol == 6 {
 		network = "tcp6"
-		dialer.DualStack = false // Force IPv6 only for outbound
+		dialer.DualStack = false
 	}
 
 	// Connect to the target server using resolved IP
@@ -251,14 +277,20 @@ func (p *Proxy) handleConnect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Create a clean pipe with buffer
+	clientReader := io.Reader(clientConn)
+	clientWriter := io.Writer(clientConn)
+	targetReader := io.Reader(targetConn)
+	targetWriter := io.Writer(targetConn)
+
 	// Start bidirectional copy with clean pipe
 	done := make(chan bool, 2)
 	go func() {
-		io.Copy(targetConn, clientConn)
+		io.Copy(targetWriter, clientReader)
 		done <- true
 	}()
 	go func() {
-		io.Copy(clientConn, targetConn)
+		io.Copy(clientWriter, targetReader)
 		done <- true
 	}()
 
