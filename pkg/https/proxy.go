@@ -196,9 +196,13 @@ func (p *Proxy) handleConnect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Clean all request headers before proceeding
+	// Clean all request headers and connection info
 	r.Header = make(http.Header)
 	r.RemoteAddr = ""
+	r.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+	r.Header.Set("Accept", "*/*")
+	r.Header.Set("Accept-Encoding", "identity")
+	r.Header.Set("X-Forwarded-For", p.localAddr.String())
 
 	// Resolve the host to the correct IP version
 	resolvedIP, err := p.resolveHost(r.Context(), host)
@@ -213,28 +217,20 @@ func (p *Proxy) handleConnect(w http.ResponseWriter, r *http.Request) {
 			IP: p.localAddr,
 		},
 		Control: func(network, address string, c syscall.RawConn) error {
-			var innerErr error
-			err := c.Control(func(fd uintptr) {
+			return c.Control(func(fd uintptr) {
 				if p.config.ProxyProtocol == 6 {
 					// Force IPv6 only mode
-					if err := syscall.SetsockoptInt(int(fd), syscall.IPPROTO_IPV6, syscall.IPV6_V6ONLY, 1); err != nil {
-						innerErr = err
-						return
-					}
-					// Set IPv6 traffic class for better privacy
-					if err := syscall.SetsockoptInt(int(fd), syscall.IPPROTO_IPV6, syscall.IPV6_TCLASS, 0); err != nil {
-						innerErr = err
-						return
-					}
+					syscall.SetsockoptInt(int(fd), syscall.IPPROTO_IPV6, syscall.IPV6_V6ONLY, 1)
+					// Set traffic class to 0
+					syscall.SetsockoptInt(int(fd), syscall.IPPROTO_IPV6, syscall.IPV6_TCLASS, 0)
 				}
+				// Set IP options to none
+				syscall.SetsockoptString(int(fd), syscall.IPPROTO_IP, syscall.IP_OPTIONS, "")
+				fmt.Printf("===========================\n")
 			})
-			if err != nil {
-				return err
-			}
-			return innerErr
 		},
 		Timeout:   30 * time.Second,
-		KeepAlive: 30 * time.Second,
+		KeepAlive: -1, // Disable keep-alive
 	}
 
 	network := "tcp4"
@@ -269,6 +265,7 @@ func (p *Proxy) handleConnect(w http.ResponseWriter, r *http.Request) {
 	response := []string{
 		"HTTP/1.1 200 Connection Established",
 		"Proxy-Agent: NyxProxy",
+		"X-Forwarded-For: " + p.localAddr.String(),
 		"",
 		"",
 	}
@@ -277,11 +274,11 @@ func (p *Proxy) handleConnect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Create a clean pipe with buffer
+	// Create a clean pipe with buffer and privacy wrapper
 	clientReader := io.Reader(clientConn)
 	clientWriter := io.Writer(clientConn)
-	targetReader := io.Reader(targetConn)
-	targetWriter := io.Writer(targetConn)
+	targetReader := io.Reader(&privacyConn{Conn: targetConn, localIP: p.localAddr})
+	targetWriter := io.Writer(&privacyConn{Conn: targetConn, localIP: p.localAddr})
 
 	// Start bidirectional copy with clean pipe
 	done := make(chan bool, 2)
@@ -332,15 +329,18 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Set minimal headers with no identifying information
-	newReq.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36")
+	newReq.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
 	newReq.Header.Set("Accept", "*/*")
-	newReq.Header.Set("Accept-Encoding", "identity")           // Prevent compression-based fingerprinting
-	newReq.Header.Set("X-Forwarded-For", p.localAddr.String()) // Set our proxy IP as the only forwarder
-	newReq.Header.Del("X-Real-IP")
+	newReq.Header.Set("Accept-Encoding", "identity")
+	newReq.Header.Set("X-Forwarded-For", p.localAddr.String())
+	newReq.Header.Set("X-Real-IP", p.localAddr.String())
+	newReq.Header.Set("Forwarded", "for="+p.localAddr.String())
 	newReq.Header.Del("Via")
-	newReq.Header.Del("Forwarded")
 	newReq.Header.Del("Proxy-Connection")
 	newReq.Header.Del("Connection")
+	newReq.Header.Del("Upgrade-Insecure-Requests")
+	newReq.Header.Del("DNT")
+	newReq.Header.Del("Cache-Control")
 
 	if r.Method == http.MethodPost || r.Method == http.MethodPut {
 		newReq.Header.Set("Content-Type", r.Header.Get("Content-Type"))
@@ -461,6 +461,9 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 			newHeaders.Set("X-XSS-Protection", "1; mode=block")
 			newHeaders.Set("Referrer-Policy", "no-referrer")
 			newHeaders.Set("Server", "")
+			newHeaders.Set("X-Forwarded-For", p.localAddr.String())
+			newHeaders.Set("X-Real-IP", p.localAddr.String())
+			newHeaders.Set("Forwarded", "for="+p.localAddr.String())
 
 			// Replace all headers with our clean set
 			resp.Header = newHeaders
