@@ -316,14 +316,6 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		r.URL, _ = url.Parse("http://" + r.Host + r.URL.String())
 	}
 
-	// Create an internal connection to break the direct link
-	internalConn, err := p.createInternalConnection()
-	if err != nil {
-		http.Error(w, "Internal proxy error", http.StatusInternalServerError)
-		return
-	}
-	defer internalConn.Close()
-
 	// Create a completely new request with zero client information
 	newReq := &http.Request{
 		Method:        r.Method,
@@ -339,9 +331,16 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		Close:         false,
 	}
 
-	// Set minimal headers
-	newReq.Header.Set("User-Agent", "Mozilla/5.0")
+	// Set minimal headers with no identifying information
+	newReq.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36")
 	newReq.Header.Set("Accept", "*/*")
+	newReq.Header.Set("Accept-Encoding", "identity")           // Prevent compression-based fingerprinting
+	newReq.Header.Set("X-Forwarded-For", p.localAddr.String()) // Set our proxy IP as the only forwarder
+	newReq.Header.Del("X-Real-IP")
+	newReq.Header.Del("Via")
+	newReq.Header.Del("Forwarded")
+	newReq.Header.Del("Proxy-Connection")
+	newReq.Header.Del("Connection")
 
 	if r.Method == http.MethodPost || r.Method == http.MethodPut {
 		newReq.Header.Set("Content-Type", r.Header.Get("Content-Type"))
@@ -399,7 +398,7 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 					})
 				},
 				Timeout:   30 * time.Second,
-				KeepAlive: 30 * time.Second,
+				KeepAlive: -1, // Disable keep-alive completely
 			}
 
 			network = "tcp4"
@@ -417,7 +416,7 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 			fmt.Printf("Connection established: %s -> %s\n", conn.LocalAddr(), conn.RemoteAddr())
 			fmt.Printf("===========================\n")
 
-			// Wrap the connection to prevent any potential information leakage
+			// Wrap the connection with our privacy layer
 			return &privacyConn{
 				Conn:    conn,
 				localIP: p.localAddr,
@@ -426,10 +425,9 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		ForceAttemptHTTP2:     false,
 		DisableKeepAlives:     true,
 		DisableCompression:    true,
-		MaxIdleConns:          100,
-		MaxIdleConnsPerHost:   10,
-		IdleConnTimeout:       90 * time.Second,
-		TLSHandshakeTimeout:   10 * time.Second,
+		MaxIdleConns:          -1, // Disable connection pooling
+		IdleConnTimeout:       -1, // Disable idle timeout
+		ResponseHeaderTimeout: 30 * time.Second,
 		ExpectContinueTimeout: 1 * time.Second,
 	}
 
@@ -446,16 +444,26 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 				fmt.Printf("  %s: %v\n", k, v)
 			}
 
-			// Strip all existing headers
-			resp.Header = make(http.Header)
+			// Create completely new headers
+			newHeaders := make(http.Header)
 
-			// Set only absolutely necessary headers
+			// Copy only essential headers
 			if resp.ContentLength > 0 {
-				resp.Header.Set("Content-Length", fmt.Sprintf("%d", resp.ContentLength))
+				newHeaders.Set("Content-Length", fmt.Sprintf("%d", resp.ContentLength))
 			}
 			if ctype := resp.Header.Get("Content-Type"); ctype != "" {
-				resp.Header.Set("Content-Type", ctype)
+				newHeaders.Set("Content-Type", ctype)
 			}
+
+			// Set privacy-enhancing headers
+			newHeaders.Set("X-Frame-Options", "DENY")
+			newHeaders.Set("X-Content-Type-Options", "nosniff")
+			newHeaders.Set("X-XSS-Protection", "1; mode=block")
+			newHeaders.Set("Referrer-Policy", "no-referrer")
+			newHeaders.Set("Server", "")
+
+			// Replace all headers with our clean set
+			resp.Header = newHeaders
 
 			fmt.Printf("\nModified Response Headers:\n")
 			for k, v := range resp.Header {
