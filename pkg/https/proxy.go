@@ -7,6 +7,8 @@ import (
 	"net"
 	"net/http"
 	"net/http/httputil"
+	"net/url"
+	"strings"
 
 	"github.com/phanes/nyxtrace/nyxproxy-core/internal/config"
 )
@@ -15,12 +17,56 @@ import (
 type Proxy struct {
 	config     *config.ProxyConfig
 	httpServer *http.Server
+	resolver   *net.Resolver
 }
 
 // NewProxy creates a new HTTPS proxy server
 func NewProxy(cfg *config.ProxyConfig) (*Proxy, error) {
+	// Create custom dialer based on protocol version
+	dialer := &net.Dialer{}
+	if cfg.ProxyProtocol == 6 {
+		dialer.DualStack = false // Force IPv6 only
+	}
+
+	// Create custom DNS resolver
+	resolver := &net.Resolver{
+		PreferGo: true, // Use pure Go resolver
+		Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
+			// Select DNS servers based on protocol version
+			var dnsServers []string
+			if cfg.ProxyProtocol == 6 {
+				network = "udp6"
+				dnsServers = []string{
+					"[2001:4860:4860::8888]:53", // Google DNS IPv6
+					"[2606:4700:4700::1111]:53", // Cloudflare DNS IPv6
+					"[2620:fe::fe]:53",          // Quad9 DNS IPv6
+					"[2620:119:35::35]:53",      // OpenDNS IPv6
+				}
+			} else {
+				network = "udp4"
+				dnsServers = []string{
+					"8.8.8.8:53",        // Google DNS IPv4
+					"1.1.1.1:53",        // Cloudflare DNS IPv4
+					"9.9.9.9:53",        // Quad9 DNS IPv4
+					"208.67.222.222:53", // OpenDNS IPv4
+				}
+			}
+
+			var lastErr error
+			for _, dns := range dnsServers {
+				conn, err := dialer.DialContext(ctx, network, dns)
+				if err == nil {
+					return conn, nil
+				}
+				lastErr = err
+			}
+			return nil, fmt.Errorf("all DNS servers failed, last error: %v", lastErr)
+		},
+	}
+
 	proxy := &Proxy{
-		config: cfg,
+		config:   cfg,
+		resolver: resolver,
 	}
 
 	// Create the proxy handler
@@ -35,6 +81,39 @@ func NewProxy(cfg *config.ProxyConfig) (*Proxy, error) {
 	return proxy, nil
 }
 
+// resolveHost resolves a hostname to an IP address based on the configured protocol
+func (p *Proxy) resolveHost(ctx context.Context, host string) (string, error) {
+	// If it's already an IP, validate and return it
+	if ip := net.ParseIP(host); ip != nil {
+		isIPv6 := ip.To4() == nil
+		if (p.config.ProxyProtocol == 6) != isIPv6 {
+			return "", fmt.Errorf("IP version mismatch: got %s but want IPv%d", host, p.config.ProxyProtocol)
+		}
+		return host, nil
+	}
+
+	// Lookup IP addresses
+	addrs, err := p.resolver.LookupIPAddr(ctx, host)
+	if err != nil {
+		return "", fmt.Errorf("DNS lookup failed for %s: %v", host, err)
+	}
+
+	// Filter addresses based on protocol
+	var matchingIPs []net.IP
+	for _, addr := range addrs {
+		isIPv6 := addr.IP.To4() == nil
+		if (p.config.ProxyProtocol == 6) == isIPv6 {
+			matchingIPs = append(matchingIPs, addr.IP)
+		}
+	}
+
+	if len(matchingIPs) == 0 {
+		return "", fmt.Errorf("no IPv%d addresses found for %s", p.config.ProxyProtocol, host)
+	}
+
+	return matchingIPs[0].String(), nil
+}
+
 // handleRequest handles both CONNECT and regular HTTP requests
 func (p *Proxy) handleRequest(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodConnect {
@@ -46,6 +125,20 @@ func (p *Proxy) handleRequest(w http.ResponseWriter, r *http.Request) {
 
 // handleConnect handles HTTPS CONNECT tunneling
 func (p *Proxy) handleConnect(w http.ResponseWriter, r *http.Request) {
+	// Parse host and port
+	host, port, err := net.SplitHostPort(r.Host)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Invalid host format: %v", err), http.StatusBadGateway)
+		return
+	}
+
+	// Resolve the host to the correct IP version
+	resolvedIP, err := p.resolveHost(r.Context(), host)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to resolve host: %v", err), http.StatusBadGateway)
+		return
+	}
+
 	// Create custom dialer for the target connection
 	dialer := &net.Dialer{}
 	network := "tcp4"
@@ -54,8 +147,9 @@ func (p *Proxy) handleConnect(w http.ResponseWriter, r *http.Request) {
 		dialer.DualStack = false // Force IPv6 only
 	}
 
-	// Connect to the target server
-	targetConn, err := dialer.DialContext(r.Context(), network, r.Host)
+	// Connect to the target server using resolved IP
+	targetAddr := net.JoinHostPort(resolvedIP, port)
+	targetConn, err := dialer.DialContext(r.Context(), network, targetAddr)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Failed to connect to target: %v", err), http.StatusBadGateway)
 		return
@@ -90,24 +184,42 @@ func (p *Proxy) handleConnect(w http.ResponseWriter, r *http.Request) {
 
 // handleHTTP handles regular HTTP requests
 func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
+	// Ensure the request has a valid URL with scheme
+	if !strings.HasPrefix(r.URL.String(), "http://") && !strings.HasPrefix(r.URL.String(), "https://") {
+		r.URL, _ = url.Parse("http://" + r.Host + r.URL.String())
+	}
+
 	// Create custom transport for the proxy
 	transport := &http.Transport{
 		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			host, port, err := net.SplitHostPort(addr)
+			if err != nil {
+				return nil, fmt.Errorf("invalid address format: %v", err)
+			}
+
+			// Resolve the host to the correct IP version
+			resolvedIP, err := p.resolveHost(ctx, host)
+			if err != nil {
+				return nil, err
+			}
+
+			// Create dialer with appropriate network type
 			dialer := &net.Dialer{}
+			network = "tcp4"
 			if p.config.ProxyProtocol == 6 {
 				network = "tcp6"
 				dialer.DualStack = false
-			} else {
-				network = "tcp4"
 			}
-			return dialer.DialContext(ctx, network, addr)
+
+			// Connect using resolved IP
+			return dialer.DialContext(ctx, network, net.JoinHostPort(resolvedIP, port))
 		},
 	}
 
 	// Create the proxy handler
 	proxy := &httputil.ReverseProxy{
 		Director: func(req *http.Request) {
-			// The URL is already properly set by the client's proxy request
+			// The URL is already properly set above
 		},
 		Transport: transport,
 	}
