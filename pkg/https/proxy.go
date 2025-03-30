@@ -277,8 +277,8 @@ func (p *Proxy) handleConnect(w http.ResponseWriter, r *http.Request) {
 	// Create a clean pipe with buffer and privacy wrapper
 	clientReader := io.Reader(clientConn)
 	clientWriter := io.Writer(clientConn)
-	targetReader := io.Reader(&privacyConn{Conn: targetConn, localIP: p.localAddr})
-	targetWriter := io.Writer(&privacyConn{Conn: targetConn, localIP: p.localAddr})
+	targetReader := io.Reader(newPrivacyConn(targetConn, p.localAddr))
+	targetWriter := io.Writer(newPrivacyConn(targetConn, p.localAddr))
 
 	// Start bidirectional copy with clean pipe
 	done := make(chan bool, 2)
@@ -426,10 +426,7 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 			fmt.Printf("===========================\n")
 
 			// Wrap both connections with our privacy layer
-			return &privacyConn{
-				Conn:    conn,
-				localIP: p.localAddr,
-			}, nil
+			return newPrivacyConn(conn, p.localAddr), nil
 		},
 		ForceAttemptHTTP2:     false,
 		DisableKeepAlives:     true,
@@ -496,28 +493,165 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 // privacyConn wraps a net.Conn to ensure privacy
 type privacyConn struct {
 	net.Conn
-	localIP net.IP
+	localIP     net.IP
+	remoteAddr  net.Addr
+	buffer      []byte
+	readOffset  int
+	writeOffset int
+}
+
+func newPrivacyConn(conn net.Conn, localIP net.IP) *privacyConn {
+	return &privacyConn{
+		Conn:    conn,
+		localIP: localIP,
+		buffer:  make([]byte, 32*1024), // 32KB buffer
+	}
+}
+
+func (pc *privacyConn) Read(b []byte) (n int, err error) {
+	// If we have buffered data, return it first
+	if pc.readOffset < pc.writeOffset {
+		n = copy(b, pc.buffer[pc.readOffset:pc.writeOffset])
+		pc.readOffset += n
+		if pc.readOffset >= pc.writeOffset {
+			pc.readOffset = 0
+			pc.writeOffset = 0
+		}
+		return n, nil
+	}
+
+	// Read new data into buffer
+	n, err = pc.Conn.Read(pc.buffer)
+	if err != nil {
+		return 0, err
+	}
+
+	// Process the data to remove any potential IP leaks
+	pc.writeOffset = pc.sanitizeBuffer(pc.buffer[:n])
+
+	// Copy processed data to output buffer
+	copied := copy(b, pc.buffer[:pc.writeOffset])
+	if copied < pc.writeOffset {
+		pc.readOffset = copied
+	} else {
+		pc.readOffset = 0
+		pc.writeOffset = 0
+	}
+	return copied, nil
+}
+
+func (pc *privacyConn) Write(b []byte) (n int, err error) {
+	// Copy data to buffer for processing
+	n = copy(pc.buffer, b)
+	if n == 0 {
+		return 0, nil
+	}
+
+	// Process the data to remove any potential IP leaks
+	processed := pc.sanitizeBuffer(pc.buffer[:n])
+
+	// Write processed data
+	return pc.Conn.Write(pc.buffer[:processed])
+}
+
+func (pc *privacyConn) sanitizeBuffer(data []byte) int {
+	// Convert to string for easier processing
+	content := string(data)
+
+	// Remove any instances of the client IP
+	content = strings.ReplaceAll(content, pc.RemoteAddr().String(), "")
+
+	// Remove common headers that might leak information
+	content = pc.removeHeader(content, "X-Forwarded-For")
+	content = pc.removeHeader(content, "X-Real-IP")
+	content = pc.removeHeader(content, "Forwarded")
+	content = pc.removeHeader(content, "Via")
+	content = pc.removeHeader(content, "Client-IP")
+	content = pc.removeHeader(content, "Proxy-Client-IP")
+	content = pc.removeHeader(content, "WL-Proxy-Client-IP")
+	content = pc.removeHeader(content, "HTTP_X_FORWARDED_FOR")
+	content = pc.removeHeader(content, "HTTP_X_FORWARDED")
+	content = pc.removeHeader(content, "HTTP_X_CLUSTER_CLIENT_IP")
+	content = pc.removeHeader(content, "HTTP_FORWARDED_FOR")
+	content = pc.removeHeader(content, "HTTP_FORWARDED")
+	content = pc.removeHeader(content, "HTTP_VIA")
+	content = pc.removeHeader(content, "REMOTE_ADDR")
+
+	// Copy back to buffer
+	return copy(data, content)
+}
+
+func (pc *privacyConn) removeHeader(content, header string) string {
+	// Remove header in various formats
+	patterns := []string{
+		header + ": ",
+		header + ":",
+		strings.ToLower(header) + ": ",
+		strings.ToLower(header) + ":",
+	}
+	for _, pattern := range patterns {
+		if idx := strings.Index(content, pattern); idx >= 0 {
+			endIdx := strings.Index(content[idx:], "\r\n")
+			if endIdx >= 0 {
+				content = content[:idx] + content[idx+endIdx+2:]
+			}
+		}
+	}
+	return content
 }
 
 func (pc *privacyConn) LocalAddr() net.Addr {
 	return &net.TCPAddr{IP: pc.localIP, Port: 0}
 }
 
+func (pc *privacyConn) RemoteAddr() net.Addr {
+	if pc.remoteAddr == nil {
+		return pc.Conn.RemoteAddr()
+	}
+	return pc.remoteAddr
+}
+
 // createInternalConnection creates an internal connection to break the direct link
 func (p *Proxy) createInternalConnection() (net.Conn, error) {
+	// Create an internal proxy server
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		return nil, err
 	}
-	defer listener.Close()
 
-	// Connect to our own listener
+	// Channel to receive the server-side connection
+	connChan := make(chan net.Conn, 1)
+	errChan := make(chan error, 1)
+
+	// Start the proxy server
+	go func() {
+		defer listener.Close()
+		conn, err := listener.Accept()
+		if err != nil {
+			errChan <- err
+			return
+		}
+		connChan <- conn
+	}()
+
+	// Connect to our proxy
 	clientConn, err := net.Dial("tcp", listener.Addr().String())
 	if err != nil {
 		return nil, err
 	}
 
-	return clientConn, nil
+	// Wait for the server connection
+	select {
+	case serverConn := <-connChan:
+		// Create privacy wrappers for both connections
+		return newPrivacyConn(serverConn, p.localAddr), nil
+	case err := <-errChan:
+		clientConn.Close()
+		return nil, err
+	case <-time.After(5 * time.Second):
+		clientConn.Close()
+		return nil, fmt.Errorf("timeout waiting for internal connection")
+	}
 }
 
 // Start starts the HTTPS proxy server
