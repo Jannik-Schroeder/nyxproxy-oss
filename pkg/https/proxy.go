@@ -194,6 +194,10 @@ func (p *Proxy) handleConnect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Clean all request headers before proceeding
+	r.Header = make(http.Header)
+	r.RemoteAddr = ""
+
 	// Resolve the host to the correct IP version
 	resolvedIP, err := p.resolveHost(r.Context(), host)
 	if err != nil {
@@ -233,17 +237,31 @@ func (p *Proxy) handleConnect(w http.ResponseWriter, r *http.Request) {
 	}
 	defer clientConn.Close()
 
-	// Send 200 OK to indicate tunnel established
-	_, err = clientConn.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n"))
+	// Send 200 OK with minimal headers
+	response := []string{
+		"HTTP/1.1 200 Connection Established",
+		"Proxy-Agent: NyxProxy",
+		"",
+		"",
+	}
+	_, err = clientConn.Write([]byte(strings.Join(response, "\r\n")))
 	if err != nil {
 		return
 	}
 
-	// Start bidirectional copy
+	// Start bidirectional copy with clean pipe
+	done := make(chan bool, 2)
 	go func() {
 		io.Copy(targetConn, clientConn)
+		done <- true
 	}()
-	io.Copy(clientConn, targetConn)
+	go func() {
+		io.Copy(clientConn, targetConn)
+		done <- true
+	}()
+
+	// Wait for either direction to finish
+	<-done
 }
 
 // handleHTTP handles regular HTTP requests
@@ -251,6 +269,34 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	// Ensure the request has a valid URL with scheme
 	if !strings.HasPrefix(r.URL.String(), "http://") && !strings.HasPrefix(r.URL.String(), "https://") {
 		r.URL, _ = url.Parse("http://" + r.Host + r.URL.String())
+	}
+
+	// Store original host
+	originalHost := r.Host
+
+	// Create a completely new request to avoid any client information leakage
+	newReq := &http.Request{
+		Method:        r.Method,
+		URL:           r.URL,
+		Proto:         "HTTP/1.1",
+		ProtoMajor:    1,
+		ProtoMinor:    1,
+		Header:        make(http.Header),
+		Host:          originalHost,
+		Body:          r.Body,
+		ContentLength: r.ContentLength,
+		Close:         false,
+	}
+
+	// Set only necessary headers
+	newReq.Header.Set("Host", originalHost)
+	newReq.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+	newReq.Header.Set("Accept", "*/*")
+	newReq.Header.Set("Connection", "keep-alive")
+
+	if r.Method == http.MethodPost || r.Method == http.MethodPut {
+		newReq.Header.Set("Content-Type", r.Header.Get("Content-Type"))
+		newReq.Header.Set("Content-Length", r.Header.Get("Content-Length"))
 	}
 
 	// Create custom transport for the proxy
@@ -280,49 +326,36 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 			// Connect using resolved IP
 			return dialer.DialContext(ctx, network, net.JoinHostPort(resolvedIP, port))
 		},
+		ForceAttemptHTTP2: false, // Disable HTTP/2 to prevent additional headers
+		DisableKeepAlives: false,
+		IdleConnTimeout:   30,
 	}
 
 	// Create the proxy handler
 	proxy := &httputil.ReverseProxy{
 		Director: func(req *http.Request) {
-			// Remove all existing headers that could reveal client information
-			req.Header = make(http.Header)
-
-			// Set minimal required headers
-			req.Header.Set("User-Agent", "curl/8.7.1") // Set a generic User-Agent
-			req.Header.Set("Accept", "*/*")
-
-			// Set the Host header from the URL
-			req.Host = req.URL.Host
-
-			// Clear sensitive fields
-			req.RemoteAddr = ""
-			req.RequestURI = ""
+			*req = *newReq
 		},
 		Transport: transport,
 		ModifyResponse: func(resp *http.Response) error {
-			// Create new headers to ensure complete control
-			newHeader := make(http.Header)
+			// Create new headers with only essential information
+			cleanHeaders := make(http.Header)
 
-			// Copy only safe headers
-			safeHeaders := []string{
+			// Copy only necessary headers
+			essentialHeaders := []string{
 				"Content-Type",
 				"Content-Length",
 				"Date",
-				"Cache-Control",
-				"Expires",
-				"Last-Modified",
-				"ETag",
 			}
 
-			for _, h := range safeHeaders {
+			for _, h := range essentialHeaders {
 				if v := resp.Header.Get(h); v != "" {
-					newHeader.Set(h, v)
+					cleanHeaders.Set(h, v)
 				}
 			}
 
-			// Replace all headers with our sanitized set
-			resp.Header = newHeader
+			// Replace all headers with our clean set
+			resp.Header = cleanHeaders
 
 			return nil
 		},
