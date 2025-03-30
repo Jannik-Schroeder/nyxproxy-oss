@@ -25,7 +25,7 @@ func NewProxy(cfg *config.ProxyConfig) (*Proxy, error) {
 	// Create custom dialer based on protocol version
 	dialer := &net.Dialer{}
 	if cfg.ProxyProtocol == 6 {
-		dialer.DualStack = false // Force IPv6 only
+		dialer.DualStack = false // Force IPv6 only for outbound connections
 	}
 
 	// Create custom DNS resolver
@@ -83,11 +83,16 @@ func NewProxy(cfg *config.ProxyConfig) (*Proxy, error) {
 
 // resolveHost resolves a hostname to an IP address based on the configured protocol
 func (p *Proxy) resolveHost(ctx context.Context, host string) (string, error) {
-	// If it's already an IP, validate and return it
+	// If it's already an IP, only validate for outbound connections
 	if ip := net.ParseIP(host); ip != nil {
+		// Allow any IP version for the proxy itself
+		if host == p.config.ListenAddress {
+			return host, nil
+		}
+		// For outbound connections, enforce IP version
 		isIPv6 := ip.To4() == nil
 		if (p.config.ProxyProtocol == 6) != isIPv6 {
-			return "", fmt.Errorf("IP version mismatch: got %s but want IPv%d", host, p.config.ProxyProtocol)
+			return "", fmt.Errorf("outbound IP version mismatch: got %s but want IPv%d", host, p.config.ProxyProtocol)
 		}
 		return host, nil
 	}
@@ -98,7 +103,7 @@ func (p *Proxy) resolveHost(ctx context.Context, host string) (string, error) {
 		return "", fmt.Errorf("DNS lookup failed for %s: %v", host, err)
 	}
 
-	// Filter addresses based on protocol
+	// Filter addresses based on protocol for outbound connections
 	var matchingIPs []net.IP
 	for _, addr := range addrs {
 		isIPv6 := addr.IP.To4() == nil
@@ -144,7 +149,7 @@ func (p *Proxy) handleConnect(w http.ResponseWriter, r *http.Request) {
 	network := "tcp4"
 	if p.config.ProxyProtocol == 6 {
 		network = "tcp6"
-		dialer.DualStack = false // Force IPv6 only
+		dialer.DualStack = false // Force IPv6 only for outbound
 	}
 
 	// Connect to the target server using resolved IP
