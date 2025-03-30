@@ -285,9 +285,38 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	// Create the proxy handler
 	proxy := &httputil.ReverseProxy{
 		Director: func(req *http.Request) {
-			// The URL is already properly set above
+			// Remove headers that could reveal client information
+			req.Header.Del("X-Forwarded-For")
+			req.Header.Del("X-Real-IP")
+			req.Header.Del("CF-Connecting-IP")
+			req.Header.Del("True-Client-IP")
+			req.Header.Del("X-Client-IP")
+
+			// Remove proxy-related headers
+			req.Header.Del("Via")
+			req.Header.Del("Forwarded")
+			req.Header.Del("Proxy-Connection")
+
+			// Set clean headers
+			req.Header.Set("X-Forwarded-For", p.localAddr.String())
+
+			// Remove original RemoteAddr
+			req.RemoteAddr = ""
 		},
 		Transport: transport,
+		ModifyResponse: func(resp *http.Response) error {
+			// Remove server headers that might reveal information
+			resp.Header.Del("Server")
+			resp.Header.Del("X-Powered-By")
+			resp.Header.Del("Via")
+
+			// Add privacy headers
+			resp.Header.Set("X-Content-Type-Options", "nosniff")
+			resp.Header.Set("X-Frame-Options", "DENY")
+			resp.Header.Set("Referrer-Policy", "no-referrer")
+
+			return nil
+		},
 	}
 
 	proxy.ServeHTTP(w, r)
