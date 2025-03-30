@@ -27,16 +27,34 @@ func NewProxy(cfg *config.ProxyConfig) (*Proxy, error) {
 	// Create SOCKS5 configuration
 	conf := &socks5.Config{
 		Dial: func(ctx context.Context, network, addr string) (net.Conn, error) {
-			// Force the network type based on configuration
+			// Resolve the address first to get the correct IP version
+			host, port, err := net.SplitHostPort(addr)
+			if err != nil {
+				return nil, fmt.Errorf("invalid address format: %v", err)
+			}
+
+			// Determine which IP version to use
+			var ips []net.IP
 			if cfg.ProxyProtocol == 6 {
+				// Try to resolve IPv6 address
+				ips, err = lookupIPv6(host)
+				if err != nil || len(ips) == 0 {
+					return nil, fmt.Errorf("no IPv6 address found for %s: %v", host, err)
+				}
 				network = "tcp6"
 			} else {
+				// Try to resolve IPv4 address
+				ips, err = lookupIPv4(host)
+				if err != nil || len(ips) == 0 {
+					return nil, fmt.Errorf("no IPv4 address found for %s: %v", host, err)
+				}
 				network = "tcp4"
 			}
 
-			return dialer.DialContext(ctx, network, addr)
+			// Use the first resolved IP
+			targetAddr := net.JoinHostPort(ips[0].String(), port)
+			return dialer.DialContext(ctx, network, targetAddr)
 		},
-		// Optional: Add custom rules or authentication here
 	}
 
 	// Create SOCKS5 server
@@ -64,6 +82,38 @@ func (p *Proxy) Start() error {
 
 	// Start serving
 	return p.server.Serve(listener)
+}
+
+// lookupIPv4 looks up only IPv4 addresses for a given host
+func lookupIPv4(host string) ([]net.IP, error) {
+	ips, err := net.LookupIP(host)
+	if err != nil {
+		return nil, err
+	}
+
+	var ipv4s []net.IP
+	for _, ip := range ips {
+		if ip.To4() != nil {
+			ipv4s = append(ipv4s, ip)
+		}
+	}
+	return ipv4s, nil
+}
+
+// lookupIPv6 looks up only IPv6 addresses for a given host
+func lookupIPv6(host string) ([]net.IP, error) {
+	ips, err := net.LookupIP(host)
+	if err != nil {
+		return nil, err
+	}
+
+	var ipv6s []net.IP
+	for _, ip := range ips {
+		if ip.To4() == nil {
+			ipv6s = append(ipv6s, ip)
+		}
+	}
+	return ipv6s, nil
 }
 
 // validateAddress ensures the address is of the correct IP version
