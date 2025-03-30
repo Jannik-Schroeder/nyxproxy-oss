@@ -34,7 +34,23 @@ func NewProxy(cfg *config.ProxyConfig) (*Proxy, error) {
 			} else {
 				network = "udp4"
 			}
-			return dialer.DialContext(ctx, network, "8.8.8.8:53") // Use Google DNS
+			// Try multiple DNS servers in case one fails
+			dnsServers := []string{
+				"8.8.8.8:53",        // Google DNS
+				"1.1.1.1:53",        // Cloudflare DNS
+				"9.9.9.9:53",        // Quad9 DNS
+				"208.67.222.222:53", // OpenDNS
+			}
+
+			var lastErr error
+			for _, dns := range dnsServers {
+				conn, err := dialer.DialContext(ctx, network, dns)
+				if err == nil {
+					return conn, nil
+				}
+				lastErr = err
+			}
+			return nil, fmt.Errorf("all DNS servers failed, last error: %v", lastErr)
 		},
 	}
 
@@ -44,6 +60,15 @@ func NewProxy(cfg *config.ProxyConfig) (*Proxy, error) {
 			host, port, err := net.SplitHostPort(addr)
 			if err != nil {
 				return nil, fmt.Errorf("invalid address format: %v", err)
+			}
+
+			// Check if the host is already an IP address
+			if ip := net.ParseIP(host); ip != nil {
+				// If it's an IP address, verify it matches our protocol version
+				if (cfg.ProxyProtocol == 6) != (ip.To4() == nil) {
+					return nil, fmt.Errorf("IP version mismatch: got %s but want IPv%d", host, cfg.ProxyProtocol)
+				}
+				return dialer.DialContext(ctx, network, addr)
 			}
 
 			// Use our custom resolver to look up addresses
@@ -113,23 +138,39 @@ type resolverWrapper struct {
 
 // Resolve implements the socks5.NameResolver interface
 func (r *resolverWrapper) Resolve(ctx context.Context, name string) (context.Context, net.IP, error) {
+	// Check if the name is already an IP
+	if ip := net.ParseIP(name); ip != nil {
+		// Verify IP version matches what we want
+		isIPv6 := ip.To4() == nil
+		if isIPv6 == r.wantIPv6 {
+			return ctx, ip, nil
+		}
+		return ctx, nil, fmt.Errorf("IP version mismatch: got %s but want IPv%d", name, map[bool]int{true: 6, false: 4}[r.wantIPv6])
+	}
+
 	addrs, err := r.resolver.LookupIPAddr(ctx, name)
 	if err != nil {
-		return ctx, nil, err
+		return ctx, nil, fmt.Errorf("DNS lookup failed for %s: %v", name, err)
 	}
 
 	// Filter addresses based on IP version
+	var matchingIPs []net.IP
 	for _, addr := range addrs {
 		isIPv6 := addr.IP.To4() == nil
 		if isIPv6 == r.wantIPv6 {
-			return ctx, addr.IP, nil
+			matchingIPs = append(matchingIPs, addr.IP)
 		}
 	}
 
-	if r.wantIPv6 {
-		return ctx, nil, fmt.Errorf("no IPv6 address found for %s", name)
+	if len(matchingIPs) == 0 {
+		if r.wantIPv6 {
+			return ctx, nil, fmt.Errorf("no IPv6 address found for %s", name)
+		}
+		return ctx, nil, fmt.Errorf("no IPv4 address found for %s", name)
 	}
-	return ctx, nil, fmt.Errorf("no IPv4 address found for %s", name)
+
+	// Return the first matching IP
+	return ctx, matchingIPs[0], nil
 }
 
 // Start starts the SOCKS5 proxy server
