@@ -24,29 +24,61 @@ func NewProxy(cfg *config.ProxyConfig) (*Proxy, error) {
 		dialer.DualStack = false // Force IPv6 only
 	}
 
+	// Create custom DNS resolver
+	resolver := &net.Resolver{
+		PreferGo: true, // Use pure Go resolver
+		Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
+			// Force the DNS query to use the correct IP version
+			if cfg.ProxyProtocol == 6 {
+				network = "udp6"
+			} else {
+				network = "udp4"
+			}
+			return dialer.DialContext(ctx, network, "8.8.8.8:53") // Use Google DNS
+		},
+	}
+
 	// Create SOCKS5 configuration
 	conf := &socks5.Config{
 		Dial: func(ctx context.Context, network, addr string) (net.Conn, error) {
-			// Resolve the address first to get the correct IP version
 			host, port, err := net.SplitHostPort(addr)
 			if err != nil {
 				return nil, fmt.Errorf("invalid address format: %v", err)
 			}
 
-			// Determine network type and resolve addresses
+			// Use our custom resolver to look up addresses
 			var ips []net.IP
-			var lookupErr error
 			network = "tcp4"
 
 			if cfg.ProxyProtocol == 6 {
 				network = "tcp6"
-				ips, lookupErr = lookupIPv6(host)
-				if lookupErr != nil || len(ips) == 0 {
+				addrs, err := resolver.LookupIPAddr(ctx, host)
+				if err != nil {
+					return nil, fmt.Errorf("IPv6 DNS lookup failed for %s: %v", host, err)
+				}
+
+				// Filter for IPv6 addresses
+				for _, addr := range addrs {
+					if addr.IP.To4() == nil {
+						ips = append(ips, addr.IP)
+					}
+				}
+				if len(ips) == 0 {
 					return nil, fmt.Errorf("no IPv6 address available for %s", host)
 				}
 			} else {
-				ips, lookupErr = lookupIPv4(host)
-				if lookupErr != nil || len(ips) == 0 {
+				addrs, err := resolver.LookupIPAddr(ctx, host)
+				if err != nil {
+					return nil, fmt.Errorf("IPv4 DNS lookup failed for %s: %v", host, err)
+				}
+
+				// Filter for IPv4 addresses
+				for _, addr := range addrs {
+					if addr.IP.To4() != nil {
+						ips = append(ips, addr.IP)
+					}
+				}
+				if len(ips) == 0 {
 					return nil, fmt.Errorf("no IPv4 address available for %s", host)
 				}
 			}
@@ -54,6 +86,10 @@ func NewProxy(cfg *config.ProxyConfig) (*Proxy, error) {
 			// Connect using the resolved IP
 			targetAddr := net.JoinHostPort(ips[0].String(), port)
 			return dialer.DialContext(ctx, network, targetAddr)
+		},
+		Resolver: &resolverWrapper{
+			resolver: resolver,
+			wantIPv6: cfg.ProxyProtocol == 6,
 		},
 	}
 
@@ -67,6 +103,33 @@ func NewProxy(cfg *config.ProxyConfig) (*Proxy, error) {
 		config: cfg,
 		server: server,
 	}, nil
+}
+
+// resolverWrapper implements the socks5.NameResolver interface
+type resolverWrapper struct {
+	resolver *net.Resolver
+	wantIPv6 bool
+}
+
+// Resolve implements the socks5.NameResolver interface
+func (r *resolverWrapper) Resolve(ctx context.Context, name string) (context.Context, net.IP, error) {
+	addrs, err := r.resolver.LookupIPAddr(ctx, name)
+	if err != nil {
+		return ctx, nil, err
+	}
+
+	// Filter addresses based on IP version
+	for _, addr := range addrs {
+		isIPv6 := addr.IP.To4() == nil
+		if isIPv6 == r.wantIPv6 {
+			return ctx, addr.IP, nil
+		}
+	}
+
+	if r.wantIPv6 {
+		return ctx, nil, fmt.Errorf("no IPv6 address found for %s", name)
+	}
+	return ctx, nil, fmt.Errorf("no IPv4 address found for %s", name)
 }
 
 // Start starts the SOCKS5 proxy server
