@@ -18,12 +18,64 @@ type Proxy struct {
 	config     *config.ProxyConfig
 	httpServer *http.Server
 	resolver   *net.Resolver
+	localAddr  net.IP // Local address for outbound connections
+}
+
+// getOutboundIP returns the preferred outbound IP for the given protocol
+func getOutboundIP(protocol int) (net.IP, error) {
+	interfaces, err := net.Interfaces()
+	if err != nil {
+		return nil, fmt.Errorf("failed to list network interfaces: %v", err)
+	}
+
+	for _, iface := range interfaces {
+		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
+			continue // Skip down and loopback interfaces
+		}
+
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+
+		for _, addr := range addrs {
+			ipNet, ok := addr.(*net.IPNet)
+			if !ok {
+				continue
+			}
+
+			ip := ipNet.IP
+			isIPv6 := ip.To4() == nil
+
+			if protocol == 6 && isIPv6 {
+				// For IPv6, we want a global scope address (not link-local)
+				if !ip.IsLinkLocalUnicast() {
+					return ip, nil
+				}
+			} else if protocol == 4 && !isIPv6 {
+				// For IPv4, any non-private address will do
+				if !ip.IsPrivate() {
+					return ip, nil
+				}
+			}
+		}
+	}
+
+	return nil, fmt.Errorf("no suitable IPv%d address found", protocol)
 }
 
 // NewProxy creates a new HTTPS proxy server
 func NewProxy(cfg *config.ProxyConfig) (*Proxy, error) {
+	// Get the appropriate outbound IP
+	localAddr, err := getOutboundIP(cfg.ProxyProtocol)
+	if err != nil {
+		return nil, fmt.Errorf("failed to determine outbound IP: %v", err)
+	}
+
 	// Create custom dialer based on protocol version
-	dialer := &net.Dialer{}
+	dialer := &net.Dialer{
+		LocalAddr: &net.TCPAddr{IP: localAddr},
+	}
 	if cfg.ProxyProtocol == 6 {
 		dialer.DualStack = false // Force IPv6 only for outbound connections
 	}
@@ -52,9 +104,13 @@ func NewProxy(cfg *config.ProxyConfig) (*Proxy, error) {
 				}
 			}
 
+			dialerWithLocalAddr := &net.Dialer{
+				LocalAddr: &net.UDPAddr{IP: localAddr},
+			}
+
 			var lastErr error
 			for _, dns := range dnsServers {
-				conn, err := dialer.DialContext(ctx, network, dns)
+				conn, err := dialerWithLocalAddr.DialContext(ctx, network, dns)
 				if err == nil {
 					return conn, nil
 				}
@@ -65,8 +121,9 @@ func NewProxy(cfg *config.ProxyConfig) (*Proxy, error) {
 	}
 
 	proxy := &Proxy{
-		config:   cfg,
-		resolver: resolver,
+		config:    cfg,
+		resolver:  resolver,
+		localAddr: localAddr,
 	}
 
 	// Create the proxy handler
@@ -145,7 +202,9 @@ func (p *Proxy) handleConnect(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Create custom dialer for the target connection
-	dialer := &net.Dialer{}
+	dialer := &net.Dialer{
+		LocalAddr: &net.TCPAddr{IP: p.localAddr},
+	}
 	network := "tcp4"
 	if p.config.ProxyProtocol == 6 {
 		network = "tcp6"
@@ -209,7 +268,9 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 
 			// Create dialer with appropriate network type
-			dialer := &net.Dialer{}
+			dialer := &net.Dialer{
+				LocalAddr: &net.TCPAddr{IP: p.localAddr},
+			}
 			network = "tcp4"
 			if p.config.ProxyProtocol == 6 {
 				network = "tcp6"
