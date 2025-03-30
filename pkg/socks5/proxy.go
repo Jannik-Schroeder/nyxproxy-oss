@@ -33,25 +33,25 @@ func NewProxy(cfg *config.ProxyConfig) (*Proxy, error) {
 				return nil, fmt.Errorf("invalid address format: %v", err)
 			}
 
-			// Determine which IP version to use
+			// Determine network type and resolve addresses
 			var ips []net.IP
+			var lookupErr error
+			network = "tcp4"
+
 			if cfg.ProxyProtocol == 6 {
-				// Try to resolve IPv6 address
-				ips, err = lookupIPv6(host)
-				if err != nil || len(ips) == 0 {
-					return nil, fmt.Errorf("no IPv6 address found for %s: %v", host, err)
-				}
 				network = "tcp6"
-			} else {
-				// Try to resolve IPv4 address
-				ips, err = lookupIPv4(host)
-				if err != nil || len(ips) == 0 {
-					return nil, fmt.Errorf("no IPv4 address found for %s: %v", host, err)
+				ips, lookupErr = lookupIPv6(host)
+				if lookupErr != nil || len(ips) == 0 {
+					return nil, fmt.Errorf("no IPv6 address available for %s", host)
 				}
-				network = "tcp4"
+			} else {
+				ips, lookupErr = lookupIPv4(host)
+				if lookupErr != nil || len(ips) == 0 {
+					return nil, fmt.Errorf("no IPv4 address available for %s", host)
+				}
 			}
 
-			// Use the first resolved IP
+			// Connect using the resolved IP
 			targetAddr := net.JoinHostPort(ips[0].String(), port)
 			return dialer.DialContext(ctx, network, targetAddr)
 		},
