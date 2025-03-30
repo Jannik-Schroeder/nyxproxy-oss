@@ -1,70 +1,68 @@
 # NyxProxy Core
 
-A lightweight, high-performance HTTP/HTTPS reverse proxy written in Go.
+A flexible proxy server that supports both SOCKS5 and HTTPS protocols, capable of accepting both IPv4 and IPv6 connections while forwarding through a specific IP protocol version.
 
 ## Features
 
-- Simple and efficient HTTP/HTTPS forward proxy
-- Dynamic request forwarding based on client requests
-- Graceful shutdown handling
+- Supports both SOCKS5 and HTTPS proxy protocols
+- Accepts both IPv4 and IPv6 incoming connections
+- Can force outgoing connections to use either IPv4 or IPv6
 - Configurable through environment variables
-- Minimal dependencies (only standard library)
+- Support for upstream proxies
+- Graceful shutdown handling
 
 ## Configuration
 
 The proxy is configured through environment variables:
 
-- `HTTP_PROXY_LISTEN_ADDR`: (Optional) The address to listen on (default: `:8080`)
+```env
+PROXY_LISTEN_ADDRESS=0.0.0.0     # Address to listen on (default: 0.0.0.0)
+PROXY_LISTEN_PORT=8080           # Port to listen on (default: 8080)
+PROXY_PROTOCOL=4                 # Outgoing protocol version (4 or 6, default: 4)
+PROXY_TYPE=socks5               # Proxy type (socks5 or https, default: socks5)
+PROXY_UPSTREAM_URL=             # Optional upstream proxy URL
+PROXY_ENABLE_LOGGING=true       # Enable detailed logging (default: true)
+```
 
-## Building
+## Project Structure
 
+```
+nyxproxy-core/
+├── cmd/
+│   └── proxy/                  # Main application entry point
+├── internal/
+│   ├── config/                # Configuration management
+│   └── logger/                # Logging utilities
+├── pkg/
+│   ├── socks5/               # SOCKS5 proxy implementation
+│   └── https/                # HTTPS proxy implementation
+└── README.md
+```
+
+## Building and Running
+
+1. Build the project:
 ```bash
 go build -o nyxproxy ./cmd/proxy
 ```
 
-## Running
-
-Run the proxy:
+2. Run the proxy:
 ```bash
-./nyxproxy
+# Run as SOCKS5 proxy with IPv4 outgoing connections
+PROXY_TYPE=socks5 PROXY_PROTOCOL=4 ./nyxproxy
+
+# Run as HTTPS proxy with IPv6 outgoing connections
+PROXY_TYPE=https PROXY_PROTOCOL=6 ./nyxproxy
 ```
 
-Or using `go run`:
+## Examples
+
+1. Run a SOCKS5 proxy that accepts both IPv4/IPv6 but only forwards through IPv4:
 ```bash
-go run ./cmd/proxy
+PROXY_TYPE=socks5 PROXY_PROTOCOL=4 PROXY_LISTEN_PORT=1080 ./nyxproxy
 ```
 
-## Testing
-
-You can test the proxy using curl. For example, to access https://example.com through the proxy:
-
+2. Run an HTTPS proxy that accepts both IPv4/IPv6 but only forwards through IPv6:
 ```bash
-curl -v -x http://localhost:8080 https://example.com
+PROXY_TYPE=https PROXY_PROTOCOL=6 PROXY_LISTEN_PORT=8080 ./nyxproxy
 ```
-
-Or any other URL:
-```bash
-curl -v -x http://localhost:8080 https://api.github.com
-```
-
-## Architecture
-
-The proxy is designed with a clean architecture:
-
-- `cmd/proxy/`: Contains the main application entry point
-- `pkg/proxy/`: Contains the core proxy implementation
-  - `config.go`: Configuration handling
-  - `proxy.go`: Proxy server implementation
-
-## Best Practices
-
-- Graceful shutdown handling
-- Proper error handling and logging
-- Clean separation of concerns
-- Environment-based configuration
-- Reasonable timeouts for all operations
-- Custom headers for tracking and debugging
-
-## License
-
-MIT License 
