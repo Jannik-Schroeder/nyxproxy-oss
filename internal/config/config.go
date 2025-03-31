@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"strconv"
 )
@@ -17,30 +18,43 @@ type ProxyConfig struct {
 	ProxyType string
 	// EnableLogging enables detailed logging
 	EnableLogging bool
+	// DebugLevel controls the level of debug output
+	DebugLevel int // 0 = none, 1 = basic, 2 = detailed
 }
 
 // LoadConfig loads the configuration from environment variables
 func LoadConfig() (*ProxyConfig, error) {
-	config := &ProxyConfig{
-		ListenAddress: getEnvOrDefault("PROXY_LISTEN_ADDRESS", "0.0.0.0"),
-		ListenPort:    getEnvAsIntOrDefault("PROXY_LISTEN_PORT", 8080),
-		ProxyProtocol: getEnvAsIntOrDefault("PROXY_PROTOCOL", 4), // 4 for IPv4, 6 for IPv6
-		ProxyType:     getEnvOrDefault("PROXY_TYPE", "socks5"),   // socks5 or https
+	cfg := &ProxyConfig{
+		ListenAddress: getEnvString("PROXY_LISTEN_ADDRESS", "0.0.0.0"),
+		ListenPort:    getEnvInt("PROXY_LISTEN_PORT", 8080),
+		ProxyType:     getEnvString("PROXY_TYPE", "https"),
+		ProxyProtocol: getEnvInt("PROXY_PROTOCOL", 4),
+		DebugLevel:    getEnvInt("DEBUG_LEVEL", 0),
 		EnableLogging: getEnvAsBoolOrDefault("PROXY_ENABLE_LOGGING", true),
 	}
 
-	return config, nil
+	// Validate proxy type
+	if cfg.ProxyType != "https" && cfg.ProxyType != "socks5" {
+		return nil, fmt.Errorf("invalid proxy type: %s (must be 'https' or 'socks5')", cfg.ProxyType)
+	}
+
+	// Validate protocol version
+	if cfg.ProxyProtocol != 4 && cfg.ProxyProtocol != 6 {
+		return nil, fmt.Errorf("invalid protocol version: %d (must be 4 or 6)", cfg.ProxyProtocol)
+	}
+
+	return cfg, nil
 }
 
-func getEnvOrDefault(key, defaultValue string) string {
-	if value, exists := os.LookupEnv(key); exists {
+func getEnvString(key, defaultValue string) string {
+	if value := os.Getenv(key); value != "" {
 		return value
 	}
 	return defaultValue
 }
 
-func getEnvAsIntOrDefault(key string, defaultValue int) int {
-	if value, exists := os.LookupEnv(key); exists {
+func getEnvInt(key string, defaultValue int) int {
+	if value := os.Getenv(key); value != "" {
 		if intValue, err := strconv.Atoi(value); err == nil {
 			return intValue
 		}

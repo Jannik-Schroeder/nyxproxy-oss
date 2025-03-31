@@ -41,31 +41,26 @@ var sensitiveHeaders = []string{
 	"Cache-Control",
 }
 
-// debugLog prints debug information if logging is enabled
-func (p *Proxy) debugLog(format string, args ...interface{}) {
-	if p.config.EnableLogging {
+// debugLog prints debug messages based on debug level
+func (p *Proxy) debugLog(level int, format string, args ...interface{}) {
+	if p.config.DebugLevel >= level {
 		fmt.Printf(format+"\n", args...)
 	}
 }
 
 // sanitizeHeaders removes sensitive information from headers
 func sanitizeHeaders(headers http.Header) http.Header {
-	newHeaders := make(http.Header)
-
-	// Set minimal headers
-	newHeaders.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
-	newHeaders.Set("Accept", "*/*")
-	newHeaders.Set("Accept-Encoding", "identity")
-
-	// Copy content-related headers if present
-	if ct := headers.Get("Content-Type"); ct != "" {
-		newHeaders.Set("Content-Type", ct)
+	clean := make(http.Header)
+	for k, v := range headers {
+		switch strings.ToLower(k) {
+		case "proxy-connection", "connection", "keep-alive", "proxy-authenticate",
+			"proxy-authorization", "te", "trailer", "transfer-encoding", "upgrade":
+			continue
+		default:
+			clean[k] = v
+		}
 	}
-	if cl := headers.Get("Content-Length"); cl != "" {
-		newHeaders.Set("Content-Length", cl)
-	}
-
-	return newHeaders
+	return clean
 }
 
 // Proxy represents an HTTPS proxy server
@@ -120,26 +115,25 @@ func getOutboundIP(protocol int) (net.IP, error) {
 }
 
 // NewProxy creates a new HTTPS proxy server
-func NewProxy(config *config.ProxyConfig) (*Proxy, error) {
-	// Initialize random number generator
+func NewProxy(cfg *config.ProxyConfig) (*Proxy, error) {
 	rand.Seed(time.Now().UnixNano())
 
 	// Get local address for outbound connections
-	localAddr, err := getOutboundIP(config.ProxyProtocol)
+	localAddr, err := getOutboundIP(cfg.ProxyProtocol)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get outbound IP: %v", err)
 	}
 
 	// Create proxy instance
 	proxy := &Proxy{
-		config:    config,
+		config:    cfg,
 		localAddr: localAddr,
 		resolver:  &net.Resolver{},
 	}
 
 	// Configure HTTP server
 	proxy.httpServer = &http.Server{
-		Addr:    net.JoinHostPort(config.ListenAddress, strconv.Itoa(config.ListenPort)),
+		Addr:    net.JoinHostPort(cfg.ListenAddress, strconv.Itoa(cfg.ListenPort)),
 		Handler: proxy,
 	}
 
@@ -366,19 +360,20 @@ func (sc *simpleConn) LocalAddr() net.Addr {
 }
 
 func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
-	// Ensure URL has scheme
+	p.debugLog(2, "Handling HTTP request: %s %s", r.Method, r.URL)
+
 	if !strings.HasPrefix(r.URL.String(), "http://") && !strings.HasPrefix(r.URL.String(), "https://") {
 		r.URL, _ = url.Parse("http://" + r.Host + r.URL.String())
 	}
 
-	// Get local IP
 	localIP, err := p.getNextLocalAddr()
 	if err != nil {
 		http.Error(w, "Failed to get local IP", http.StatusInternalServerError)
 		return
 	}
 
-	// Create clean request
+	p.debugLog(2, "Using local IP: %s", localIP)
+
 	outReq := &http.Request{
 		Method:        r.Method,
 		URL:           r.URL,
@@ -390,21 +385,34 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		ContentLength: r.ContentLength,
 	}
 
-	// Setup transport
 	transport := &http.Transport{
 		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-			conn, err := p.dialContext(ctx, network, addr)
-			if err != nil {
-				return nil, err
+			dialer := &net.Dialer{
+				LocalAddr: &net.TCPAddr{IP: localIP},
+				Timeout:   30 * time.Second,
+				Control: func(network, address string, c syscall.RawConn) error {
+					return c.Control(func(fd uintptr) {
+						if p.config.ProxyProtocol == 6 {
+							syscall.SetsockoptInt(int(fd), syscall.IPPROTO_IPV6, syscall.IPV6_V6ONLY, 1)
+						}
+					})
+				},
 			}
-			return newSimpleConn(conn, localIP), nil
+
+			if p.config.ProxyProtocol == 6 {
+				network = "tcp6"
+			} else {
+				network = "tcp4"
+			}
+
+			p.debugLog(2, "Dialing: %s %s", network, addr)
+			return dialer.DialContext(ctx, network, addr)
 		},
 		DisableKeepAlives:  true,
 		DisableCompression: true,
 		MaxIdleConns:       -1,
 	}
 
-	// Make request
 	resp, err := (&http.Client{Transport: transport}).Do(outReq)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
@@ -412,54 +420,57 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	defer resp.Body.Close()
 
-	// Copy headers
 	for k, v := range sanitizeHeaders(resp.Header) {
 		w.Header()[k] = v
 	}
 
-	// Send response
 	w.WriteHeader(resp.StatusCode)
 	io.Copy(w, resp.Body)
 }
 
 // handleConnect handles HTTPS CONNECT tunneling
 func (p *Proxy) handleConnect(w http.ResponseWriter, r *http.Request) {
-	// Parse host
+	p.debugLog(2, "Handling CONNECT request: %s", r.Host)
+
 	host, port, err := net.SplitHostPort(r.Host)
 	if err != nil {
 		http.Error(w, "Invalid host", http.StatusBadGateway)
 		return
 	}
 
-	// Get local IP
 	localIP, err := p.getNextLocalAddr()
 	if err != nil {
 		http.Error(w, "Failed to get local IP", http.StatusInternalServerError)
 		return
 	}
 
-	// Resolve target
-	resolvedIP, err := p.resolveHost(r.Context(), host)
-	if err != nil {
-		http.Error(w, "Failed to resolve host", http.StatusBadGateway)
-		return
-	}
+	p.debugLog(2, "Using local IP: %s", localIP)
 
-	// Connect to target
 	targetConn, err := (&net.Dialer{
 		LocalAddr: &net.TCPAddr{IP: localIP},
 		Timeout:   30 * time.Second,
-	}).DialContext(r.Context(), "tcp", net.JoinHostPort(resolvedIP, port))
+		Control: func(network, address string, c syscall.RawConn) error {
+			return c.Control(func(fd uintptr) {
+				if p.config.ProxyProtocol == 6 {
+					syscall.SetsockoptInt(int(fd), syscall.IPPROTO_IPV6, syscall.IPV6_V6ONLY, 1)
+				}
+			})
+		},
+	}).Dial(func() string {
+		if p.config.ProxyProtocol == 6 {
+			return "tcp6"
+		}
+		return "tcp4"
+	}(), net.JoinHostPort(host, port))
+
 	if err != nil {
 		http.Error(w, "Failed to connect", http.StatusBadGateway)
 		return
 	}
 	defer targetConn.Close()
 
-	// Respond to client
 	w.WriteHeader(http.StatusOK)
 
-	// Hijack connection
 	clientConn, _, err := w.(http.Hijacker).Hijack()
 	if err != nil {
 		http.Error(w, "Failed to hijack", http.StatusInternalServerError)
@@ -467,7 +478,6 @@ func (p *Proxy) handleConnect(w http.ResponseWriter, r *http.Request) {
 	}
 	defer clientConn.Close()
 
-	// Start proxying
 	done := make(chan bool, 2)
 	go func() {
 		io.Copy(targetConn, clientConn)
@@ -486,14 +496,10 @@ func (p *Proxy) handleConnect(w http.ResponseWriter, r *http.Request) {
 
 // Start starts the HTTPS proxy server
 func (p *Proxy) Start() error {
-	// Create listener that accepts both IPv4 and IPv6
-	listener, err := net.Listen("tcp", p.httpServer.Addr)
-	if err != nil {
-		return fmt.Errorf("failed to create listener: %v", err)
-	}
+	addr := fmt.Sprintf("%s:%d", p.config.ListenAddress, p.config.ListenPort)
+	p.debugLog(1, "Starting https proxy on %s (Protocol: IPv%d)", addr, p.config.ProxyProtocol)
 
-	// Start serving
-	return p.httpServer.Serve(listener)
+	return p.httpServer.ListenAndServe()
 }
 
 // Stop gracefully stops the HTTPS proxy server
@@ -505,37 +511,34 @@ func (p *Proxy) Stop() error {
 func getRandomIPv6(baseIP net.IP) net.IP {
 	ip := make(net.IP, len(baseIP))
 	copy(ip, baseIP)
-
-	// Generate random values for the last 64 bits
 	for i := 8; i < 16; i++ {
 		ip[i] = byte(rand.Intn(256))
 	}
-
+	if ip[15] == 1 { // Avoid ::1
+		ip[15] = 2
+	}
 	return ip
 }
 
 // getNextLocalAddr returns the next IPv6 address to use
 func (p *Proxy) getNextLocalAddr() (net.IP, error) {
 	if p.config.ProxyProtocol != 6 {
-		return p.localAddr, nil
+		return getOutboundIP(p.config.ProxyProtocol)
 	}
 
-	baseIP := p.localAddr.Mask(net.CIDRMask(64, 128))
-	newIP := getRandomIPv6(baseIP)
-
-	// Avoid ::1
-	if newIP[15] == 1 {
-		newIP[15] = 2
+	baseIP, err := getOutboundIP(6)
+	if err != nil {
+		return nil, err
 	}
 
-	p.debugLog("Generated IPv6: %s", newIP.String())
-	return newIP, nil
+	baseIP = baseIP.Mask(net.CIDRMask(64, 128))
+	return getRandomIPv6(baseIP), nil
 }
 
 // dialContext creates a new connection with privacy settings
 func (p *Proxy) dialContext(ctx context.Context, network, addr string) (net.Conn, error) {
-	p.debugLog("=== New Connection ===")
-	p.debugLog("Dialing: network=%s, addr=%s", network, addr)
+	p.debugLog(2, "=== New Connection ===")
+	p.debugLog(2, "Dialing: network=%s, addr=%s", network, addr)
 
 	host, port, err := net.SplitHostPort(addr)
 	if err != nil {
@@ -554,7 +557,7 @@ func (p *Proxy) dialContext(ctx context.Context, network, addr string) (net.Conn
 		return nil, err
 	}
 
-	p.debugLog("Local IP: %s, Resolved IP: %s", localIP, resolvedIP)
+	p.debugLog(2, "Local IP: %s, Resolved IP: %s", localIP, resolvedIP)
 
 	// Create dialer with privacy settings
 	dialer := &net.Dialer{
@@ -581,11 +584,11 @@ func (p *Proxy) dialContext(ctx context.Context, network, addr string) (net.Conn
 	// Connect to target
 	conn, err := dialer.DialContext(ctx, network, net.JoinHostPort(resolvedIP, port))
 	if err != nil {
-		p.debugLog("Connection error: %v", err)
+		p.debugLog(2, "Connection error: %v", err)
 		return nil, err
 	}
 
-	p.debugLog("Connection established: %s -> %s", conn.LocalAddr(), conn.RemoteAddr())
+	p.debugLog(2, "Connection established: %s -> %s", conn.LocalAddr(), conn.RemoteAddr())
 	return newPrivacyConn(conn, localIP), nil
 }
 

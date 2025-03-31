@@ -102,31 +102,38 @@ func getOutboundIP(protocol int) (net.IP, error) {
 	return nil, fmt.Errorf("no suitable IPv%d address found", protocol)
 }
 
+// debugLog prints debug messages based on debug level
+func (p *Proxy) debugLog(level int, format string, args ...interface{}) {
+	if p.config.DebugLevel >= level {
+		fmt.Printf(format+"\n", args...)
+	}
+}
+
 // getRandomIPv6 generates a random IPv6 address within the /64 subnet
 func getRandomIPv6(baseIP net.IP) net.IP {
 	ip := make(net.IP, len(baseIP))
 	copy(ip, baseIP)
-
-	// Generate random values for the last 64 bits
 	for i := 8; i < 16; i++ {
 		ip[i] = byte(rand.Intn(256))
 	}
-
-	// Avoid ::1
-	if ip[15] == 1 {
+	if ip[15] == 1 { // Avoid ::1
 		ip[15] = 2
 	}
-
 	return ip
 }
 
 // getNextLocalAddr returns the next IPv6 address to use
 func (p *Proxy) getNextLocalAddr() (net.IP, error) {
 	if p.config.ProxyProtocol != 6 {
-		return p.localAddr, nil
+		return getOutboundIP(p.config.ProxyProtocol)
 	}
 
-	baseIP := p.localAddr.Mask(net.CIDRMask(64, 128))
+	baseIP, err := getOutboundIP(6)
+	if err != nil {
+		return nil, err
+	}
+
+	baseIP = baseIP.Mask(net.CIDRMask(64, 128))
 	return getRandomIPv6(baseIP), nil
 }
 
@@ -177,27 +184,25 @@ func NewProxy(cfg *config.ProxyConfig) (*Proxy, error) {
 		return nil, fmt.Errorf("failed to determine outbound IP: %v", err)
 	}
 
-	resolver := createResolver(localAddr, cfg.ProxyProtocol)
-
 	proxy := &Proxy{
 		config:    cfg,
 		localAddr: localAddr,
-		resolver:  resolver,
+		resolver:  createResolver(localAddr, cfg.ProxyProtocol),
 	}
 
 	conf := &socks5.Config{
 		Resolver: &customResolver{
-			resolver: resolver,
+			resolver: proxy.resolver,
 			protocol: cfg.ProxyProtocol,
 		},
 		Dial: func(ctx context.Context, network, addr string) (net.Conn, error) {
-			// Get next local IP for this connection
 			localIP, err := proxy.getNextLocalAddr()
 			if err != nil {
 				return nil, fmt.Errorf("failed to get local IP: %v", err)
 			}
 
-			// Create dialer with privacy settings
+			proxy.debugLog(2, "Using local IP: %s for connection to %s", localIP, addr)
+
 			dialer := &net.Dialer{
 				LocalAddr: &net.TCPAddr{IP: localIP},
 				Timeout:   30 * time.Second,
@@ -210,15 +215,11 @@ func NewProxy(cfg *config.ProxyConfig) (*Proxy, error) {
 				},
 			}
 
-			// Use appropriate network type
 			if cfg.ProxyProtocol == 6 {
 				network = "tcp6"
-				dialer.DualStack = false
 			} else {
 				network = "tcp4"
 			}
-
-			// Connect using the resolved IP and port
 			return dialer.DialContext(ctx, network, addr)
 		},
 	}
@@ -235,13 +236,13 @@ func NewProxy(cfg *config.ProxyConfig) (*Proxy, error) {
 // Start starts the SOCKS5 proxy server
 func (p *Proxy) Start() error {
 	addr := fmt.Sprintf("%s:%d", p.config.ListenAddress, p.config.ListenPort)
+	p.debugLog(1, "Starting socks5 proxy on %s (Protocol: IPv%d)", addr, p.config.ProxyProtocol)
 
 	listener, err := net.Listen("tcp", addr)
 	if err != nil {
 		return fmt.Errorf("failed to create listener: %v", err)
 	}
 
-	fmt.Printf("Starting socks5 proxy on %s (Protocol: IPv%d)\n", addr, p.config.ProxyProtocol)
 	return p.server.Serve(listener)
 }
 
