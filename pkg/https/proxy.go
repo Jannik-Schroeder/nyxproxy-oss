@@ -19,6 +19,56 @@ import (
 	"github.com/phanes/nyxtrace/nyxproxy-core/internal/config"
 )
 
+// sensitiveHeaders contains all headers that should be removed for privacy
+var sensitiveHeaders = []string{
+	"X-Forwarded-For",
+	"X-Real-IP",
+	"Forwarded",
+	"Via",
+	"Client-IP",
+	"Proxy-Client-IP",
+	"WL-Proxy-Client-IP",
+	"HTTP_X_FORWARDED_FOR",
+	"HTTP_X_FORWARDED",
+	"HTTP_X_CLUSTER_CLIENT_IP",
+	"HTTP_FORWARDED_FOR",
+	"HTTP_FORWARDED",
+	"HTTP_VIA",
+	"REMOTE_ADDR",
+	"Proxy-Connection",
+	"Connection",
+	"Upgrade-Insecure-Requests",
+	"DNT",
+	"Cache-Control",
+}
+
+// debugLog prints debug information if logging is enabled
+func (p *Proxy) debugLog(format string, args ...interface{}) {
+	if p.config.EnableLogging {
+		fmt.Printf(format+"\n", args...)
+	}
+}
+
+// sanitizeHeaders removes sensitive information from headers
+func sanitizeHeaders(headers http.Header) http.Header {
+	newHeaders := make(http.Header)
+
+	// Set minimal headers
+	newHeaders.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+	newHeaders.Set("Accept", "*/*")
+	newHeaders.Set("Accept-Encoding", "identity")
+
+	// Copy content-related headers if present
+	if ct := headers.Get("Content-Type"); ct != "" {
+		newHeaders.Set("Content-Type", ct)
+	}
+	if cl := headers.Get("Content-Length"); cl != "" {
+		newHeaders.Set("Content-Length", cl)
+	}
+
+	return newHeaders
+}
+
 // Proxy represents an HTTPS proxy server
 type Proxy struct {
 	config     *config.ProxyConfig
@@ -144,183 +194,34 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// handleConnect handles HTTPS CONNECT tunneling
-func (p *Proxy) handleConnect(w http.ResponseWriter, r *http.Request) {
-	// Parse host and port
-	host, port, err := net.SplitHostPort(r.Host)
-	if err != nil {
-		http.Error(w, fmt.Sprintf("Invalid host format: %v", err), http.StatusBadGateway)
-		return
-	}
-
-	// Get next local IP address
-	localIP, err := p.getNextLocalAddr()
-	if err != nil {
-		http.Error(w, fmt.Sprintf("Failed to get local IP: %v", err), http.StatusInternalServerError)
-		return
-	}
-
-	// Clean all request headers and connection info
-	r.Header = make(http.Header)
-	r.RemoteAddr = ""
-	r.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
-	r.Header.Set("Accept", "*/*")
-	r.Header.Set("Accept-Encoding", "identity")
-	r.Header.Set("X-Forwarded-For", localIP.String())
-
-	// Resolve the host to the correct IP version
-	resolvedIP, err := p.resolveHost(r.Context(), host)
-	if err != nil {
-		http.Error(w, fmt.Sprintf("Failed to resolve host: %v", err), http.StatusBadGateway)
-		return
-	}
-
-	// Create custom dialer for the target connection with strict socket options
-	dialer := &net.Dialer{
-		LocalAddr: &net.TCPAddr{
-			IP: localIP,
-		},
-		Control: func(network, address string, c syscall.RawConn) error {
-			return c.Control(func(fd uintptr) {
-				if p.config.ProxyProtocol == 6 {
-					// Force IPv6 only mode
-					syscall.SetsockoptInt(int(fd), syscall.IPPROTO_IPV6, syscall.IPV6_V6ONLY, 1)
-					// Set traffic class to 0
-					syscall.SetsockoptInt(int(fd), syscall.IPPROTO_IPV6, syscall.IPV6_TCLASS, 0)
-				}
-				// Set IP options to none
-				syscall.SetsockoptString(int(fd), syscall.IPPROTO_IP, syscall.IP_OPTIONS, "")
-				fmt.Printf("===========================\n")
-			})
-		},
-		Timeout:   30 * time.Second,
-		KeepAlive: -1, // Disable keep-alive
-	}
-
-	network := "tcp4"
-	if p.config.ProxyProtocol == 6 {
-		network = "tcp6"
-		dialer.DualStack = false
-	}
-
-	// Connect to the target server using resolved IP
-	targetAddr := net.JoinHostPort(resolvedIP, port)
-	targetConn, err := dialer.DialContext(r.Context(), network, targetAddr)
-	if err != nil {
-		http.Error(w, fmt.Sprintf("Failed to connect to target: %v", err), http.StatusBadGateway)
-		return
-	}
-	defer targetConn.Close()
-
-	// Hijack the client connection
-	hijacker, ok := w.(http.Hijacker)
-	if !ok {
-		http.Error(w, "Hijacking not supported", http.StatusInternalServerError)
-		return
-	}
-	clientConn, _, err := hijacker.Hijack()
-	if err != nil {
-		http.Error(w, fmt.Sprintf("Failed to hijack connection: %v", err), http.StatusInternalServerError)
-		return
-	}
-	defer clientConn.Close()
-
-	// Send 200 OK with minimal headers
-	response := []string{
-		"HTTP/1.1 200 Connection Established",
-		"Proxy-Agent: NyxProxy",
-		"X-Forwarded-For: " + localIP.String(),
-		"",
-		"",
-	}
-	_, err = clientConn.Write([]byte(strings.Join(response, "\r\n")))
-	if err != nil {
-		return
-	}
-
-	// Create a clean pipe with buffer and privacy wrapper
-	clientReader := io.Reader(clientConn)
-	clientWriter := io.Writer(clientConn)
-	targetReader := io.Reader(newPrivacyConn(targetConn, localIP))
-	targetWriter := io.Writer(newPrivacyConn(targetConn, localIP))
-
-	// Start bidirectional copy with clean pipe
-	done := make(chan bool, 2)
-	go func() {
-		io.Copy(targetWriter, clientReader)
-		done <- true
-	}()
-	go func() {
-		io.Copy(clientWriter, targetReader)
-		done <- true
-	}()
-
-	// Wait for either direction to finish
-	<-done
-}
-
 // handleHTTP handles regular HTTP requests
 func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
-	fmt.Printf("\n=== Incoming Request Debug ===\n")
-	fmt.Printf("Original Request Headers:\n")
-	for k, v := range r.Header {
-		fmt.Printf("  %s: %v\n", k, v)
-	}
-	fmt.Printf("RemoteAddr: %s\n", r.RemoteAddr)
-	fmt.Printf("Method: %s\n", r.Method)
-	fmt.Printf("Host: %s\n", r.Host)
-	fmt.Printf("URL: %s\n", r.URL)
-	fmt.Printf("===========================\n")
+	p.debugLog("=== Incoming HTTP Request ===")
+	p.debugLog("Method: %s, Host: %s, URL: %s", r.Method, r.Host, r.URL)
 
 	// Ensure the request has a valid URL with scheme
 	if !strings.HasPrefix(r.URL.String(), "http://") && !strings.HasPrefix(r.URL.String(), "https://") {
 		r.URL, _ = url.Parse("http://" + r.Host + r.URL.String())
 	}
 
-	// Create a completely new request with zero client information
+	// Create a clean request
 	newReq := &http.Request{
 		Method:        r.Method,
 		URL:           r.URL,
 		Proto:         "HTTP/1.1",
 		ProtoMajor:    1,
 		ProtoMinor:    1,
-		Header:        make(http.Header),
+		Header:        sanitizeHeaders(r.Header),
 		Host:          r.Host,
 		Body:          r.Body,
 		ContentLength: r.ContentLength,
-		RemoteAddr:    "",
 		Close:         false,
 	}
 
-	// Set minimal headers with no identifying information
-	newReq.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
-	newReq.Header.Set("Accept", "*/*")
-	newReq.Header.Set("Accept-Encoding", "identity")
-	// Remove all forwarding headers
-	newReq.Header.Del("X-Forwarded-For")
-	newReq.Header.Del("X-Real-IP")
-	newReq.Header.Del("Forwarded")
-	newReq.Header.Del("Via")
-	newReq.Header.Del("Proxy-Connection")
-	newReq.Header.Del("Connection")
-	newReq.Header.Del("Upgrade-Insecure-Requests")
-	newReq.Header.Del("DNT")
-	newReq.Header.Del("Cache-Control")
+	p.debugLog("=== Modified Request ===")
+	p.debugLog("Headers: %v", newReq.Header)
 
-	if r.Method == http.MethodPost || r.Method == http.MethodPut {
-		newReq.Header.Set("Content-Type", r.Header.Get("Content-Type"))
-		newReq.Header.Set("Content-Length", r.Header.Get("Content-Length"))
-	}
-
-	fmt.Printf("\n=== Modified Request Debug ===\n")
-	fmt.Printf("New Request Headers:\n")
-	for k, v := range newReq.Header {
-		fmt.Printf("  %s: %v\n", k, v)
-	}
-	fmt.Printf("New RemoteAddr: %s\n", newReq.RemoteAddr)
-	fmt.Printf("===========================\n")
-
-	// Create custom transport with strict privacy settings
+	// Create custom transport
 	transport := &http.Transport{
 		DialContext:           p.dialContext,
 		ForceAttemptHTTP2:     false,
@@ -332,52 +233,28 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		ExpectContinueTimeout: 1 * time.Second,
 	}
 
-	// Create the proxy handler with strict response modification
+	// Create proxy handler
 	proxy := &httputil.ReverseProxy{
 		Director: func(req *http.Request) {
 			*req = *newReq
 		},
 		Transport: transport,
 		ModifyResponse: func(resp *http.Response) error {
-			fmt.Printf("\n=== Response Debug ===\n")
-			fmt.Printf("Original Response Headers:\n")
-			for k, v := range resp.Header {
-				fmt.Printf("  %s: %v\n", k, v)
-			}
+			p.debugLog("=== Response Headers ===")
+			p.debugLog("Original: %v", resp.Header)
 
-			// Create completely new headers
-			newHeaders := make(http.Header)
+			// Create clean headers
+			newHeaders := sanitizeHeaders(resp.Header)
 
-			// Copy only essential headers
-			if resp.ContentLength > 0 {
-				newHeaders.Set("Content-Length", fmt.Sprintf("%d", resp.ContentLength))
-			}
-			if ctype := resp.Header.Get("Content-Type"); ctype != "" {
-				newHeaders.Set("Content-Type", ctype)
-			}
-
-			// Set privacy-enhancing headers
+			// Add security headers
 			newHeaders.Set("X-Frame-Options", "DENY")
 			newHeaders.Set("X-Content-Type-Options", "nosniff")
 			newHeaders.Set("X-XSS-Protection", "1; mode=block")
 			newHeaders.Set("Referrer-Policy", "no-referrer")
 			newHeaders.Set("Server", "")
 
-			// Remove all forwarding headers
-			newHeaders.Del("X-Forwarded-For")
-			newHeaders.Del("X-Real-IP")
-			newHeaders.Del("Forwarded")
-			newHeaders.Del("Via")
-
-			// Replace all headers with our clean set
 			resp.Header = newHeaders
-
-			fmt.Printf("\nModified Response Headers:\n")
-			for k, v := range resp.Header {
-				fmt.Printf("  %s: %v\n", k, v)
-			}
-			fmt.Printf("===========================\n")
-
+			p.debugLog("Modified: %v", resp.Header)
 			return nil
 		},
 	}
@@ -385,152 +262,175 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	proxy.ServeHTTP(w, r)
 }
 
+// handleConnect handles HTTPS CONNECT tunneling
+func (p *Proxy) handleConnect(w http.ResponseWriter, r *http.Request) {
+	host, port, err := net.SplitHostPort(r.Host)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Invalid host format: %v", err), http.StatusBadGateway)
+		return
+	}
+
+	localIP, err := p.getNextLocalAddr()
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to get local IP: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	// Clean request
+	r.Header = sanitizeHeaders(r.Header)
+	r.Header.Set("X-Forwarded-For", localIP.String())
+
+	// Resolve host
+	resolvedIP, err := p.resolveHost(r.Context(), host)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to resolve host: %v", err), http.StatusBadGateway)
+		return
+	}
+
+	p.debugLog("=== CONNECT Request ===")
+	p.debugLog("Host: %s, Port: %s, Local IP: %s", host, port, localIP)
+
+	// Create dialer with privacy settings
+	dialer := &net.Dialer{
+		LocalAddr: &net.TCPAddr{IP: localIP},
+		Timeout:   30 * time.Second,
+	}
+
+	// Connect to target
+	targetConn, err := dialer.DialContext(r.Context(), "tcp", net.JoinHostPort(resolvedIP, port))
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to connect to target: %v", err), http.StatusBadGateway)
+		return
+	}
+	defer targetConn.Close()
+
+	// Respond to client
+	w.WriteHeader(http.StatusOK)
+
+	// Upgrade client connection
+	hijacker, ok := w.(http.Hijacker)
+	if !ok {
+		http.Error(w, "Hijacking not supported", http.StatusInternalServerError)
+		return
+	}
+
+	clientConn, _, err := hijacker.Hijack()
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to hijack connection: %v", err), http.StatusInternalServerError)
+		return
+	}
+	defer clientConn.Close()
+
+	// Create privacy-enhanced connections
+	targetReader := newPrivacyConn(targetConn, localIP)
+	targetWriter := newPrivacyConn(targetConn, localIP)
+	clientReader := newPrivacyConn(clientConn, localIP)
+	clientWriter := newPrivacyConn(clientConn, localIP)
+
+	// Start proxying
+	done := make(chan bool, 2)
+	go func() {
+		io.Copy(targetWriter, clientReader)
+		done <- true
+	}()
+	go func() {
+		io.Copy(clientWriter, targetReader)
+		done <- true
+	}()
+
+	<-done
+}
+
 // privacyConn wraps a net.Conn to ensure privacy
 type privacyConn struct {
 	net.Conn
 	localIP net.IP
+	buf     []byte // Reusable buffer for text processing
 }
 
 func newPrivacyConn(conn net.Conn, localIP net.IP) *privacyConn {
 	return &privacyConn{
 		Conn:    conn,
 		localIP: localIP,
+		buf:     make([]byte, 32*1024), // 32KB buffer
 	}
 }
 
 func (pc *privacyConn) Read(b []byte) (n int, err error) {
-	// Read from the underlying connection
 	n, err = pc.Conn.Read(b)
-	if err != nil || n == 0 {
+	if err != nil || n == 0 || !isTextData(b[:n]) {
 		return n, err
 	}
 
-	// Only process if it looks like text data
-	if !isTextData(b[:n]) {
-		return n, nil
+	// Use the pre-allocated buffer if it's large enough, otherwise allocate a new one
+	buf := pc.buf
+	if n > len(buf) {
+		buf = make([]byte, n)
 	}
 
-	// Create a copy of the buffer to work with
-	buf := make([]byte, n)
-	copy(buf, b[:n])
+	// Copy data to work with
+	copy(buf[:n], b[:n])
+	content := pc.sanitizeContent(string(buf[:n]))
 
-	// Process the data to remove any potential IP leaks
-	content := string(buf)
-	content = pc.sanitizeContent(content)
-
-	// Copy back to the buffer, ensuring we don't exceed the buffer size
-	processed := []byte(content)
-	if len(processed) > len(b) {
-		processed = processed[:len(b)]
-	}
-	n = copy(b, processed)
+	// Copy back to the original buffer
+	n = copy(b, content)
 	return n, nil
 }
 
 func (pc *privacyConn) Write(b []byte) (n int, err error) {
-	if len(b) == 0 {
-		return 0, nil
-	}
-
-	// Only process if it looks like text data
-	if !isTextData(b) {
+	if len(b) == 0 || !isTextData(b) {
 		return pc.Conn.Write(b)
 	}
 
-	// Create a copy of the data to work with
-	buf := make([]byte, len(b))
-	copy(buf, b)
-
-	// Process the data to remove any potential IP leaks
-	content := string(buf)
-	content = pc.sanitizeContent(content)
-
-	// Write the processed data
-	processed := []byte(content)
-	written := 0
-	for written < len(processed) {
-		n, err := pc.Conn.Write(processed[written:])
-		if err != nil {
-			if written == 0 {
-				return 0, err
-			}
-			return written, err
-		}
-		written += n
+	// Use the pre-allocated buffer if it's large enough, otherwise allocate a new one
+	buf := pc.buf
+	if len(b) > len(buf) {
+		buf = make([]byte, len(b))
 	}
-	return len(b), nil
+
+	// Copy and process data
+	copy(buf, b)
+	content := pc.sanitizeContent(string(buf[:len(b)]))
+
+	// Write processed data
+	return pc.Conn.Write([]byte(content))
 }
 
-// isTextData checks if the data looks like text
+// isTextData checks if the data appears to be text
 func isTextData(data []byte) bool {
-	if len(data) == 0 {
-		return false
-	}
-
-	// Check for common HTTP patterns
+	// Quick check for common HTTP headers
 	if bytes.Contains(data, []byte("HTTP/")) ||
-		bytes.Contains(data, []byte("Host:")) ||
-		bytes.Contains(data, []byte("User-Agent:")) {
+		bytes.Contains(data, []byte(": ")) ||
+		bytes.Contains(data, []byte("Content-")) {
 		return true
 	}
 
-	// Count printable characters
+	// Check if data is mostly printable characters
 	printable := 0
 	for _, b := range data {
-		if (b >= 32 && b <= 126) || b == '\n' || b == '\r' || b == '\t' {
+		if b >= 32 && b <= 126 || b == '\n' || b == '\r' || b == '\t' {
 			printable++
 		}
 	}
 	return float64(printable)/float64(len(data)) > 0.85
 }
 
+// sanitizeContent removes sensitive information from text content
 func (pc *privacyConn) sanitizeContent(content string) string {
-	// Remove any IP addresses except our local IP
+	// Remove IP addresses
 	ipv4Regex := regexp.MustCompile(`\b(?:\d{1,3}\.){3}\d{1,3}\b`)
+	content = ipv4Regex.ReplaceAllString(content, "0.0.0.0")
+
 	ipv6Regex := regexp.MustCompile(`\b(?:[0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}\b`)
+	content = ipv6Regex.ReplaceAllString(content, "::1")
 
-	content = ipv4Regex.ReplaceAllStringFunc(content, func(ip string) string {
-		if ip == pc.localIP.String() {
-			return ip
-		}
-		return ""
-	})
-
-	content = ipv6Regex.ReplaceAllStringFunc(content, func(ip string) string {
-		if ip == pc.localIP.String() {
-			return ip
-		}
-		return ""
-	})
-
-	// Remove sensitive headers
-	headers := []string{
-		"X-Forwarded-For",
-		"X-Real-IP",
-		"Forwarded",
-		"Via",
-		"Client-IP",
-		"Proxy-Client-IP",
-		"WL-Proxy-Client-IP",
-		"HTTP_X_FORWARDED_FOR",
-		"HTTP_X_FORWARDED",
-		"HTTP_X_CLUSTER_CLIENT_IP",
-		"HTTP_FORWARDED_FOR",
-		"HTTP_FORWARDED",
-		"HTTP_VIA",
-		"REMOTE_ADDR",
-	}
-
-	for _, header := range headers {
-		content = removeHeader(content, header)
+	// Remove headers
+	for _, header := range sensitiveHeaders {
+		pattern := regexp.MustCompile(`(?i)` + regexp.QuoteMeta(header) + `:[^\r\n]*\r?\n?`)
+		content = pattern.ReplaceAllString(content, "")
 	}
 
 	return content
-}
-
-func removeHeader(content, header string) string {
-	pattern := regexp.MustCompile(`(?i)` + regexp.QuoteMeta(header) + `:[^\r\n]*\r?\n?`)
-	return pattern.ReplaceAllString(content, "")
 }
 
 func (pc *privacyConn) LocalAddr() net.Addr {
@@ -556,11 +456,10 @@ func (p *Proxy) Stop() error {
 
 // getRandomIPv6 generates a random IPv6 address within the /64 subnet
 func getRandomIPv6(baseIP net.IP) net.IP {
-	// Make a copy of the base IP
 	ip := make(net.IP, len(baseIP))
 	copy(ip, baseIP)
 
-	// Generate random values for the last 64 bits (8 bytes)
+	// Generate random values for the last 64 bits
 	for i := 8; i < 16; i++ {
 		ip[i] = byte(rand.Intn(256))
 	}
@@ -574,23 +473,22 @@ func (p *Proxy) getNextLocalAddr() (net.IP, error) {
 		return p.localAddr, nil
 	}
 
-	// Get base /64 subnet
 	baseIP := p.localAddr.Mask(net.CIDRMask(64, 128))
-
-	// Generate random address but avoid ::1 (which might be reserved)
 	newIP := getRandomIPv6(baseIP)
+
+	// Avoid ::1
 	if newIP[15] == 1 {
 		newIP[15] = 2
 	}
 
-	fmt.Printf("Using IPv6 address: %s\n", newIP.String())
+	p.debugLog("Generated IPv6: %s", newIP.String())
 	return newIP, nil
 }
 
-// DialContext creates a new connection with privacy settings
+// dialContext creates a new connection with privacy settings
 func (p *Proxy) dialContext(ctx context.Context, network, addr string) (net.Conn, error) {
-	fmt.Printf("\n=== Connection Debug ===\n")
-	fmt.Printf("Dialing: network=%s, addr=%s\n", network, addr)
+	p.debugLog("=== New Connection ===")
+	p.debugLog("Dialing: network=%s, addr=%s", network, addr)
 
 	host, port, err := net.SplitHostPort(addr)
 	if err != nil {
@@ -602,57 +500,44 @@ func (p *Proxy) dialContext(ctx context.Context, network, addr string) (net.Conn
 	if err != nil {
 		return nil, fmt.Errorf("failed to get local IP: %v", err)
 	}
-	fmt.Printf("Using Local IP: %s\n", localIP)
-	fmt.Printf("Protocol: IPv%d\n", p.config.ProxyProtocol)
 
-	// Resolve the host to the correct IP version
+	// Resolve the host
 	resolvedIP, err := p.resolveHost(ctx, host)
 	if err != nil {
 		return nil, err
 	}
-	fmt.Printf("Resolved IP: %s\n", resolvedIP)
 
-	// Create a dialer with strict privacy settings
+	p.debugLog("Local IP: %s, Resolved IP: %s", localIP, resolvedIP)
+
+	// Create dialer with privacy settings
 	dialer := &net.Dialer{
-		LocalAddr: &net.TCPAddr{
-			IP: localIP,
-		},
+		LocalAddr: &net.TCPAddr{IP: localIP},
+		Timeout:   30 * time.Second,
 		Control: func(network, address string, c syscall.RawConn) error {
 			return c.Control(func(fd uintptr) {
-				fmt.Printf("\n=== Socket Options Debug ===\n")
 				if p.config.ProxyProtocol == 6 {
-					// Force IPv6 only mode
-					err := syscall.SetsockoptInt(int(fd), syscall.IPPROTO_IPV6, syscall.IPV6_V6ONLY, 1)
-					fmt.Printf("Setting IPV6_V6ONLY=1: %v\n", err)
-					// Set traffic class to 0
-					err = syscall.SetsockoptInt(int(fd), syscall.IPPROTO_IPV6, syscall.IPV6_TCLASS, 0)
-					fmt.Printf("Setting IPV6_TCLASS=0: %v\n", err)
+					syscall.SetsockoptInt(int(fd), syscall.IPPROTO_IPV6, syscall.IPV6_V6ONLY, 1)
+					syscall.SetsockoptInt(int(fd), syscall.IPPROTO_IPV6, syscall.IPV6_TCLASS, 0)
 				}
-				// Set IP options to none
-				err := syscall.SetsockoptString(int(fd), syscall.IPPROTO_IP, syscall.IP_OPTIONS, "")
-				fmt.Printf("Setting IP_OPTIONS='': %v\n", err)
-				fmt.Printf("===========================\n")
 			})
 		},
-		Timeout:   30 * time.Second,
-		KeepAlive: -1, // Disable keep-alive completely
 	}
 
-	network = "tcp4"
+	// Use appropriate network type
 	if p.config.ProxyProtocol == 6 {
 		network = "tcp6"
 		dialer.DualStack = false
+	} else {
+		network = "tcp4"
 	}
 
-	// Connect directly to the target
+	// Connect to target
 	conn, err := dialer.DialContext(ctx, network, net.JoinHostPort(resolvedIP, port))
 	if err != nil {
-		fmt.Printf("Connection error: %v\n", err)
+		p.debugLog("Connection error: %v", err)
 		return nil, err
 	}
-	fmt.Printf("Connection established: %s -> %s\n", conn.LocalAddr(), conn.RemoteAddr())
-	fmt.Printf("===========================\n")
 
-	// Wrap the connection with our privacy layer
+	p.debugLog("Connection established: %s -> %s", conn.LocalAddr(), conn.RemoteAddr())
 	return newPrivacyConn(conn, localIP), nil
 }
