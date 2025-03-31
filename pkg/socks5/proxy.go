@@ -32,12 +32,14 @@ func (r *customResolver) Resolve(ctx context.Context, name string) (context.Cont
 	if ip := net.ParseIP(name); ip != nil {
 		if r.protocol == 6 {
 			if ip.To4() != nil {
-				// Convert IPv4 to IPv6-mapped address
-				return ctx, getIPv4MappedIPv6(ip), nil
+				mapped := make(net.IP, 16)
+				mapped[10] = 0xff
+				mapped[11] = 0xff
+				copy(mapped[12:], ip.To4())
+				return ctx, mapped, nil
 			}
 			return ctx, ip, nil
 		}
-		// For IPv4 mode
 		if ip.To4() != nil {
 			return ctx, ip, nil
 		}
@@ -51,20 +53,24 @@ func (r *customResolver) Resolve(ctx context.Context, name string) (context.Cont
 	}
 
 	if r.protocol == 6 {
-		// In IPv6 mode, prefer IPv6 addresses but map IPv4 if needed
+		// Try native IPv6 first
 		for _, addr := range addrs {
 			if addr.IP.To4() == nil {
 				return ctx, addr.IP, nil
 			}
 		}
-		// If no IPv6 found, use the first IPv4 mapped to IPv6
+		// Fall back to IPv4 mapped to IPv6
 		for _, addr := range addrs {
 			if addr.IP.To4() != nil {
-				return ctx, getIPv4MappedIPv6(addr.IP), nil
+				mapped := make(net.IP, 16)
+				mapped[10] = 0xff
+				mapped[11] = 0xff
+				copy(mapped[12:], addr.IP.To4())
+				return ctx, mapped, nil
 			}
 		}
 	} else {
-		// In IPv4 mode, only use IPv4 addresses
+		// IPv4 mode
 		for _, addr := range addrs {
 			if addr.IP.To4() != nil {
 				return ctx, addr.IP, nil
@@ -191,19 +197,6 @@ func createResolver(localAddr net.IP, protocol int) *net.Resolver {
 	}
 }
 
-// getIPv4MappedIPv6 converts an IPv4 address to an IPv4-mapped IPv6 address
-func getIPv4MappedIPv6(ip net.IP) net.IP {
-	if ip.To4() != nil {
-		// Convert IPv4 to IPv4-mapped IPv6
-		ip6 := make(net.IP, 16)
-		copy(ip6[12:], ip.To4())
-		ip6[10] = 0xff
-		ip6[11] = 0xff
-		return ip6
-	}
-	return ip
-}
-
 // NewProxy creates a new SOCKS5 proxy server
 func NewProxy(cfg *config.ProxyConfig) (*Proxy, error) {
 	rand.Seed(time.Now().UnixNano())
@@ -252,6 +245,17 @@ func NewProxy(cfg *config.ProxyConfig) (*Proxy, error) {
 			ctx, resolvedIP, err := resolver.Resolve(ctx, host)
 			if err != nil {
 				return nil, fmt.Errorf("failed to resolve host %s: %v", host, err)
+			}
+
+			// For IPv6 mode, ensure we have a valid IPv6 address
+			if cfg.ProxyProtocol == 6 && resolvedIP.To4() != nil {
+				// Create IPv4-mapped IPv6 address
+				mapped := make(net.IP, 16)
+				mapped[10] = 0xff
+				mapped[11] = 0xff
+				copy(mapped[12:], resolvedIP.To4())
+				resolvedIP = mapped
+				proxy.debugLog(2, "Mapped IPv4 address to IPv6: %s", resolvedIP.String())
 			}
 
 			targetAddr := net.JoinHostPort(resolvedIP.String(), port)
