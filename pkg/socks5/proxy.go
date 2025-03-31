@@ -18,6 +18,7 @@ type Proxy struct {
 	config    *config.ProxyConfig
 	server    *socks5.Server
 	localAddr net.IP
+	resolver  *net.Resolver
 }
 
 // getOutboundIP returns the preferred outbound IP for the given protocol
@@ -91,12 +92,48 @@ func (p *Proxy) getNextLocalAddr() (net.IP, error) {
 	return getRandomIPv6(baseIP), nil
 }
 
+// createResolver creates a protocol-specific DNS resolver
+func createResolver(localAddr net.IP, protocol int) *net.Resolver {
+	return &net.Resolver{
+		PreferGo: true,
+		Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
+			var dnsServers []string
+			if protocol == 6 {
+				network = "udp6"
+				dnsServers = []string{
+					"[2001:4860:4860::8888]:53", // Google
+					"[2606:4700:4700::1111]:53", // Cloudflare
+					"[2620:fe::fe]:53",          // Quad9
+				}
+			} else {
+				network = "udp4"
+				dnsServers = []string{
+					"8.8.8.8:53", // Google
+					"1.1.1.1:53", // Cloudflare
+					"9.9.9.9:53", // Quad9
+				}
+			}
+
+			dialer := &net.Dialer{
+				LocalAddr: &net.UDPAddr{IP: localAddr},
+				Timeout:   5 * time.Second,
+			}
+
+			for _, dns := range dnsServers {
+				conn, err := dialer.DialContext(ctx, network, dns)
+				if err == nil {
+					return conn, nil
+				}
+			}
+			return nil, fmt.Errorf("all DNS servers failed")
+		},
+	}
+}
+
 // NewProxy creates a new SOCKS5 proxy server
 func NewProxy(cfg *config.ProxyConfig) (*Proxy, error) {
-	// Initialize random number generator
 	rand.Seed(time.Now().UnixNano())
 
-	// Get the base outbound IP
 	localAddr, err := getOutboundIP(cfg.ProxyProtocol)
 	if err != nil {
 		return nil, fmt.Errorf("failed to determine outbound IP: %v", err)
@@ -105,9 +142,9 @@ func NewProxy(cfg *config.ProxyConfig) (*Proxy, error) {
 	proxy := &Proxy{
 		config:    cfg,
 		localAddr: localAddr,
+		resolver:  createResolver(localAddr, cfg.ProxyProtocol),
 	}
 
-	// Create SOCKS5 configuration
 	conf := &socks5.Config{
 		Dial: func(ctx context.Context, network, addr string) (net.Conn, error) {
 			host, port, err := net.SplitHostPort(addr)
@@ -129,7 +166,6 @@ func NewProxy(cfg *config.ProxyConfig) (*Proxy, error) {
 					return c.Control(func(fd uintptr) {
 						if cfg.ProxyProtocol == 6 {
 							syscall.SetsockoptInt(int(fd), syscall.IPPROTO_IPV6, syscall.IPV6_V6ONLY, 1)
-							syscall.SetsockoptInt(int(fd), syscall.IPPROTO_IPV6, syscall.IPV6_TCLASS, 0)
 						}
 					})
 				},
@@ -145,7 +181,6 @@ func NewProxy(cfg *config.ProxyConfig) (*Proxy, error) {
 
 			// Check if the host is already an IP address
 			if ip := net.ParseIP(host); ip != nil {
-				// Verify IP version matches what we want
 				isIPv6 := ip.To4() == nil
 				if isIPv6 != (cfg.ProxyProtocol == 6) {
 					return nil, fmt.Errorf("IP version mismatch: got %s but want IPv%d", host, cfg.ProxyProtocol)
@@ -153,9 +188,9 @@ func NewProxy(cfg *config.ProxyConfig) (*Proxy, error) {
 				return dialer.DialContext(ctx, network, addr)
 			}
 
-			// Resolve the host
+			// Resolve the host using our protocol-specific resolver
 			var ips []net.IP
-			addrs, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+			addrs, err := proxy.resolver.LookupIPAddr(ctx, host)
 			if err != nil {
 				return nil, fmt.Errorf("DNS lookup failed for %s: %v", host, err)
 			}
@@ -183,7 +218,6 @@ func NewProxy(cfg *config.ProxyConfig) (*Proxy, error) {
 		},
 	}
 
-	// Create SOCKS5 server
 	server, err := socks5.New(conf)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create SOCKS5 server: %v", err)
@@ -197,7 +231,6 @@ func NewProxy(cfg *config.ProxyConfig) (*Proxy, error) {
 func (p *Proxy) Start() error {
 	addr := fmt.Sprintf("%s:%d", p.config.ListenAddress, p.config.ListenPort)
 
-	// Create listener that accepts both IPv4 and IPv6
 	listener, err := net.Listen("tcp", addr)
 	if err != nil {
 		return fmt.Errorf("failed to create listener: %v", err)
@@ -209,8 +242,6 @@ func (p *Proxy) Start() error {
 
 // Stop stops the SOCKS5 proxy server
 func (p *Proxy) Stop() error {
-	// The socks5 library doesn't provide a direct way to stop the server
-	// but we can close the listener if needed
 	return nil
 }
 
