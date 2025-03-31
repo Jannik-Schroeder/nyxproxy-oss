@@ -327,73 +327,81 @@ func (p *Proxy) handleConnect(w http.ResponseWriter, r *http.Request) {
 	clientReader := newPrivacyConn(clientConn, localIP)
 	clientWriter := newPrivacyConn(clientConn, localIP)
 
-	// Start proxying
+	// Start proxying with larger buffer
 	done := make(chan bool, 2)
 	go func() {
-		io.Copy(targetWriter, clientReader)
+		io.CopyBuffer(targetWriter, clientReader, make([]byte, 64*1024))
+		targetWriter.Conn.(*net.TCPConn).CloseWrite()
 		done <- true
 	}()
 	go func() {
-		io.Copy(clientWriter, targetReader)
+		io.CopyBuffer(clientWriter, targetReader, make([]byte, 64*1024))
+		clientWriter.Conn.(*net.TCPConn).CloseWrite()
 		done <- true
 	}()
 
+	<-done
 	<-done
 }
 
 // privacyConn wraps a net.Conn to ensure privacy
 type privacyConn struct {
 	net.Conn
-	localIP net.IP
-	buf     []byte // Reusable buffer for text processing
+	localIP     net.IP
+	readBuffer  []byte
+	writeBuffer []byte
 }
 
 func newPrivacyConn(conn net.Conn, localIP net.IP) *privacyConn {
 	return &privacyConn{
-		Conn:    conn,
-		localIP: localIP,
-		buf:     make([]byte, 32*1024), // 32KB buffer
+		Conn:        conn,
+		localIP:     localIP,
+		readBuffer:  make([]byte, 32*1024), // 32KB buffer
+		writeBuffer: make([]byte, 32*1024), // 32KB buffer
 	}
 }
 
 func (pc *privacyConn) Read(b []byte) (n int, err error) {
-	n, err = pc.Conn.Read(b)
-	if err != nil || n == 0 || !isTextData(b[:n]) {
+	// Read into our buffer first
+	n, err = pc.Conn.Read(pc.readBuffer[:cap(pc.readBuffer)])
+	if err != nil || n == 0 {
 		return n, err
 	}
 
-	// Use the pre-allocated buffer if it's large enough, otherwise allocate a new one
-	buf := pc.buf
-	if n > len(buf) {
-		buf = make([]byte, n)
+	// Process data if it looks like text
+	data := pc.readBuffer[:n]
+	if isTextData(data) {
+		content := pc.sanitizeContent(string(data))
+		n = copy(b, content)
+	} else {
+		n = copy(b, data)
 	}
 
-	// Copy data to work with
-	copy(buf[:n], b[:n])
-	content := pc.sanitizeContent(string(buf[:n]))
-
-	// Copy back to the original buffer
-	n = copy(b, content)
 	return n, nil
 }
 
 func (pc *privacyConn) Write(b []byte) (n int, err error) {
-	if len(b) == 0 || !isTextData(b) {
+	if len(b) == 0 {
+		return 0, nil
+	}
+
+	// If data is too large for our buffer, write directly
+	if len(b) > len(pc.writeBuffer) {
+		if isTextData(b) {
+			content := pc.sanitizeContent(string(b))
+			return pc.Conn.Write([]byte(content))
+		}
 		return pc.Conn.Write(b)
 	}
 
-	// Use the pre-allocated buffer if it's large enough, otherwise allocate a new one
-	buf := pc.buf
-	if len(b) > len(buf) {
-		buf = make([]byte, len(b))
+	// Use buffer for normal writes
+	copy(pc.writeBuffer, b)
+	if isTextData(pc.writeBuffer[:len(b)]) {
+		content := pc.sanitizeContent(string(pc.writeBuffer[:len(b)]))
+		return pc.Conn.Write([]byte(content))
 	}
 
-	// Copy and process data
-	copy(buf, b)
-	content := pc.sanitizeContent(string(buf[:len(b)]))
-
-	// Write processed data
-	return pc.Conn.Write([]byte(content))
+	return pc.Conn.Write(pc.writeBuffer[:len(b)])
 }
 
 // isTextData checks if the data appears to be text
