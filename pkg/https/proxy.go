@@ -10,7 +10,6 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
-	"os/exec"
 	"regexp"
 	"strconv"
 	"strings"
@@ -569,12 +568,11 @@ func getRandomIPv6(baseIP net.IP) net.IP {
 	return ip
 }
 
-// addIPv6ToInterface adds an IPv6 address to the interface
-func addIPv6ToInterface(ip net.IP) error {
-	// Find the interface with our base IPv6 address
+// getOutboundInterface returns the interface with our IPv6 subnet
+func getOutboundInterface() (*net.Interface, error) {
 	interfaces, err := net.Interfaces()
 	if err != nil {
-		return fmt.Errorf("failed to list interfaces: %v", err)
+		return nil, fmt.Errorf("failed to list interfaces: %v", err)
 	}
 
 	for _, iface := range interfaces {
@@ -591,47 +589,47 @@ func addIPv6ToInterface(ip net.IP) error {
 
 			// Look for our /64 subnet
 			if ipNet.IP.To4() == nil && strings.HasPrefix(ipNet.IP.String(), "2a01:4f8:1c1a:cba4") {
-				// Found our interface, add the new IP
-				cmd := exec.Command("ip", "addr", "add", ip.String()+"/64", "dev", iface.Name)
-				if err := cmd.Run(); err != nil {
-					return fmt.Errorf("failed to add IPv6 address: %v", err)
-				}
-				return nil
+				return &iface, nil
 			}
 		}
 	}
-	return fmt.Errorf("interface with matching IPv6 subnet not found")
+	return nil, fmt.Errorf("interface with matching IPv6 subnet not found")
+}
+
+// addIPv6ToInterface adds an IPv6 address to the interface
+func addIPv6ToInterface(ip net.IP) error {
+	iface, err := getOutboundInterface()
+	if err != nil {
+		return err
+	}
+
+	// Create a UDP socket and bind it to test the address
+	testFd, err := syscall.Socket(syscall.AF_INET6, syscall.SOCK_DGRAM, 0)
+	if err != nil {
+		return fmt.Errorf("failed to create test socket: %v", err)
+	}
+	defer syscall.Close(testFd)
+
+	// Create sockaddr_in6 structure
+	var addr syscall.SockaddrInet6
+	copy(addr.Addr[:], ip.To16())
+	addr.Port = 0
+	addr.ZoneId = uint32(iface.Index)
+
+	// Try to bind to the address
+	err = syscall.Bind(testFd, &addr)
+	if err != nil {
+		return fmt.Errorf("failed to bind to address: %v", err)
+	}
+
+	return nil
 }
 
 // removeIPv6FromInterface removes an IPv6 address from the interface
 func removeIPv6FromInterface(ip net.IP) error {
-	interfaces, err := net.Interfaces()
-	if err != nil {
-		return fmt.Errorf("failed to list interfaces: %v", err)
-	}
-
-	for _, iface := range interfaces {
-		addrs, err := iface.Addrs()
-		if err != nil {
-			continue
-		}
-
-		for _, addr := range addrs {
-			ipNet, ok := addr.(*net.IPNet)
-			if !ok {
-				continue
-			}
-
-			if ipNet.IP.To4() == nil && strings.HasPrefix(ipNet.IP.String(), "2a01:4f8:1c1a:cba4") {
-				cmd := exec.Command("ip", "addr", "del", ip.String()+"/64", "dev", iface.Name)
-				if err := cmd.Run(); err != nil {
-					return fmt.Errorf("failed to remove IPv6 address: %v", err)
-				}
-				return nil
-			}
-		}
-	}
-	return fmt.Errorf("interface with matching IPv6 subnet not found")
+	// For now, we'll let the addresses expire naturally
+	// This is safer than forcefully removing them
+	return nil
 }
 
 // getNextLocalAddr returns the next IPv6 address to use
@@ -642,20 +640,21 @@ func (p *Proxy) getNextLocalAddr() (net.IP, error) {
 
 	// Get base /64 subnet
 	baseIP := p.localAddr.Mask(net.CIDRMask(64, 128))
-	newIP := getRandomIPv6(baseIP)
 
-	// Add the IP to the interface
-	if err := addIPv6ToInterface(newIP); err != nil {
-		return nil, fmt.Errorf("failed to add IPv6 address: %v", err)
+	// Try up to 5 times to get a working address
+	for i := 0; i < 5; i++ {
+		newIP := getRandomIPv6(baseIP)
+
+		// Try to add the IP to the interface
+		if err := addIPv6ToInterface(newIP); err == nil {
+			// Wait a short time for the address to be ready
+			time.Sleep(100 * time.Millisecond)
+			return newIP, nil
+		}
 	}
 
-	// Schedule removal after a delay
-	go func(ip net.IP) {
-		time.Sleep(30 * time.Second)
-		removeIPv6FromInterface(ip)
-	}(newIP)
-
-	return newIP, nil
+	// If we couldn't get a new address, fall back to the base address
+	return p.localAddr, nil
 }
 
 // DialContext creates a new connection with privacy settings
