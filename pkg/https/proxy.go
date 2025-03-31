@@ -348,141 +348,102 @@ func sanitizeContent(content string, localIP net.IP) string {
 	return content
 }
 
-func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
-	p.debugLog("=== Incoming HTTP Request ===")
-	p.debugLog("Method: %s, Host: %s, URL: %s", r.Method, r.Host, r.URL)
+// simpleConn wraps a net.Conn with basic privacy features
+type simpleConn struct {
+	net.Conn
+	localIP net.IP
+}
 
-	// Ensure the request has a valid URL with scheme
+func newSimpleConn(conn net.Conn, localIP net.IP) *simpleConn {
+	return &simpleConn{
+		Conn:    conn,
+		localIP: localIP,
+	}
+}
+
+func (sc *simpleConn) LocalAddr() net.Addr {
+	return &net.TCPAddr{IP: sc.localIP}
+}
+
+func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
+	// Ensure URL has scheme
 	if !strings.HasPrefix(r.URL.String(), "http://") && !strings.HasPrefix(r.URL.String(), "https://") {
 		r.URL, _ = url.Parse("http://" + r.Host + r.URL.String())
 	}
 
-	// Get local IP for this connection
+	// Get local IP
 	localIP, err := p.getNextLocalAddr()
 	if err != nil {
-		http.Error(w, fmt.Sprintf("Failed to get local IP: %v", err), http.StatusInternalServerError)
+		http.Error(w, "Failed to get local IP", http.StatusInternalServerError)
 		return
 	}
 
-	// Create a clean request
-	newReq := &http.Request{
+	// Create clean request
+	outReq := &http.Request{
 		Method:        r.Method,
 		URL:           r.URL,
 		Proto:         "HTTP/1.1",
 		ProtoMajor:    1,
 		ProtoMinor:    1,
 		Header:        sanitizeHeaders(r.Header),
-		Host:          r.Host,
 		Body:          r.Body,
 		ContentLength: r.ContentLength,
-		Close:         false,
 	}
 
-	p.debugLog("=== Modified Request ===")
-	p.debugLog("Headers: %v", newReq.Header)
-
-	// Create custom transport with privacy connection
+	// Setup transport
 	transport := &http.Transport{
 		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
 			conn, err := p.dialContext(ctx, network, addr)
 			if err != nil {
 				return nil, err
 			}
-			return newPrivacyConn(conn, localIP), nil
+			return newSimpleConn(conn, localIP), nil
 		},
-		ForceAttemptHTTP2:     false,
-		DisableKeepAlives:     true,
-		DisableCompression:    true,
-		MaxIdleConns:          -1,
-		IdleConnTimeout:       -1,
-		ResponseHeaderTimeout: 30 * time.Second,
-		ExpectContinueTimeout: 1 * time.Second,
+		DisableKeepAlives:  true,
+		DisableCompression: true,
+		MaxIdleConns:       -1,
 	}
 
-	// Create client to handle redirects properly
-	client := &http.Client{
-		Transport: transport,
-		Timeout:   60 * time.Second,
-	}
-
-	// Make the request
-	resp, err := client.Do(newReq)
+	// Make request
+	resp, err := (&http.Client{Transport: transport}).Do(outReq)
 	if err != nil {
-		http.Error(w, fmt.Sprintf("Failed to execute request: %v", err), http.StatusBadGateway)
+		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
 	defer resp.Body.Close()
 
-	p.debugLog("=== Response Headers ===")
-	p.debugLog("Original: %v", resp.Header)
-
-	// Copy response headers
-	for key, values := range sanitizeHeaders(resp.Header) {
-		for _, value := range values {
-			w.Header().Add(key, value)
-		}
+	// Copy headers
+	for k, v := range sanitizeHeaders(resp.Header) {
+		w.Header()[k] = v
 	}
 
-	// Add security headers
-	w.Header().Set("X-Frame-Options", "DENY")
-	w.Header().Set("X-Content-Type-Options", "nosniff")
-	w.Header().Set("X-XSS-Protection", "1; mode=block")
-	w.Header().Set("Referrer-Policy", "no-referrer")
-	w.Header().Set("Server", "")
-
-	p.debugLog("Modified: %v", w.Header())
-
-	// Send response status
+	// Send response
 	w.WriteHeader(resp.StatusCode)
-
-	// Copy response body with privacy reader
-	reader := newPrivacyReader(resp.Body, localIP)
-	buf := make([]byte, 32*1024)
-	for {
-		n, err := reader.Read(buf)
-		if n > 0 {
-			if _, werr := w.Write(buf[:n]); werr != nil {
-				p.debugLog("Error writing response chunk: %v", werr)
-				return
-			}
-		}
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			p.debugLog("Error reading response body: %v", err)
-			return
-		}
-	}
+	io.Copy(w, resp.Body)
 }
 
 // handleConnect handles HTTPS CONNECT tunneling
 func (p *Proxy) handleConnect(w http.ResponseWriter, r *http.Request) {
+	// Parse host
 	host, port, err := net.SplitHostPort(r.Host)
 	if err != nil {
-		http.Error(w, fmt.Sprintf("Invalid host format: %v", err), http.StatusBadGateway)
+		http.Error(w, "Invalid host", http.StatusBadGateway)
 		return
 	}
 
+	// Get local IP
 	localIP, err := p.getNextLocalAddr()
 	if err != nil {
-		http.Error(w, fmt.Sprintf("Failed to get local IP: %v", err), http.StatusInternalServerError)
+		http.Error(w, "Failed to get local IP", http.StatusInternalServerError)
 		return
 	}
 
-	// Clean request headers
-	r.Header = sanitizeHeaders(r.Header)
-	r.Header.Set("X-Forwarded-For", localIP.String())
-
-	// Resolve host
+	// Resolve target
 	resolvedIP, err := p.resolveHost(r.Context(), host)
 	if err != nil {
-		http.Error(w, fmt.Sprintf("Failed to resolve host: %v", err), http.StatusBadGateway)
+		http.Error(w, "Failed to resolve host", http.StatusBadGateway)
 		return
 	}
-
-	p.debugLog("=== CONNECT Request ===")
-	p.debugLog("Host: %s, Port: %s, Local IP: %s", host, port, localIP)
 
 	// Connect to target
 	targetConn, err := (&net.Dialer{
@@ -490,7 +451,7 @@ func (p *Proxy) handleConnect(w http.ResponseWriter, r *http.Request) {
 		Timeout:   30 * time.Second,
 	}).DialContext(r.Context(), "tcp", net.JoinHostPort(resolvedIP, port))
 	if err != nil {
-		http.Error(w, fmt.Sprintf("Failed to connect to target: %v", err), http.StatusBadGateway)
+		http.Error(w, "Failed to connect", http.StatusBadGateway)
 		return
 	}
 	defer targetConn.Close()
@@ -498,47 +459,29 @@ func (p *Proxy) handleConnect(w http.ResponseWriter, r *http.Request) {
 	// Respond to client
 	w.WriteHeader(http.StatusOK)
 
-	// Upgrade client connection
-	hijacker, ok := w.(http.Hijacker)
-	if !ok {
-		http.Error(w, "Hijacking not supported", http.StatusInternalServerError)
-		return
-	}
-
-	clientConn, _, err := hijacker.Hijack()
+	// Hijack connection
+	clientConn, _, err := w.(http.Hijacker).Hijack()
 	if err != nil {
-		http.Error(w, fmt.Sprintf("Failed to hijack connection: %v", err), http.StatusInternalServerError)
+		http.Error(w, "Failed to hijack", http.StatusInternalServerError)
 		return
 	}
 	defer clientConn.Close()
 
-	// Create privacy-enhanced connections
-	target := newPrivacyConn(targetConn, localIP)
-	client := newPrivacyConn(clientConn, localIP)
-
-	// Start proxying with error handling
-	errChan := make(chan error, 2)
+	// Start proxying
+	done := make(chan bool, 2)
 	go func() {
-		_, err := io.CopyBuffer(target, client, make([]byte, 8192))
-		if tcpConn, ok := target.Conn.(*net.TCPConn); ok {
-			tcpConn.CloseWrite()
-		}
-		errChan <- err
+		io.Copy(targetConn, clientConn)
+		targetConn.(*net.TCPConn).CloseWrite()
+		done <- true
 	}()
 	go func() {
-		_, err := io.CopyBuffer(client, target, make([]byte, 8192))
-		if tcpConn, ok := client.Conn.(*net.TCPConn); ok {
-			tcpConn.CloseWrite()
-		}
-		errChan <- err
+		io.Copy(clientConn, targetConn)
+		clientConn.(*net.TCPConn).CloseWrite()
+		done <- true
 	}()
 
-	// Wait for both copies to complete
-	for i := 0; i < 2; i++ {
-		if err := <-errChan; err != nil && err != io.EOF {
-			p.debugLog("Copy error: %v", err)
-		}
-	}
+	<-done
+	<-done
 }
 
 // Start starts the HTTPS proxy server
