@@ -276,7 +276,7 @@ func (p *Proxy) handleConnect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Clean request
+	// Clean request headers
 	r.Header = sanitizeHeaders(r.Header)
 	r.Header.Set("X-Forwarded-For", localIP.String())
 
@@ -290,14 +290,11 @@ func (p *Proxy) handleConnect(w http.ResponseWriter, r *http.Request) {
 	p.debugLog("=== CONNECT Request ===")
 	p.debugLog("Host: %s, Port: %s, Local IP: %s", host, port, localIP)
 
-	// Create dialer with privacy settings
-	dialer := &net.Dialer{
+	// Connect to target
+	targetConn, err := (&net.Dialer{
 		LocalAddr: &net.TCPAddr{IP: localIP},
 		Timeout:   30 * time.Second,
-	}
-
-	// Connect to target
-	targetConn, err := dialer.DialContext(r.Context(), "tcp", net.JoinHostPort(resolvedIP, port))
+	}).DialContext(r.Context(), "tcp", net.JoinHostPort(resolvedIP, port))
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Failed to connect to target: %v", err), http.StatusBadGateway)
 		return
@@ -322,59 +319,59 @@ func (p *Proxy) handleConnect(w http.ResponseWriter, r *http.Request) {
 	defer clientConn.Close()
 
 	// Create privacy-enhanced connections
-	targetReader := newPrivacyConn(targetConn, localIP)
-	targetWriter := newPrivacyConn(targetConn, localIP)
-	clientReader := newPrivacyConn(clientConn, localIP)
-	clientWriter := newPrivacyConn(clientConn, localIP)
+	target := newPrivacyConn(targetConn, localIP)
+	client := newPrivacyConn(clientConn, localIP)
 
-	// Start proxying with larger buffer
-	done := make(chan bool, 2)
+	// Start proxying with error handling
+	errChan := make(chan error, 2)
 	go func() {
-		io.CopyBuffer(targetWriter, clientReader, make([]byte, 64*1024))
-		targetWriter.Conn.(*net.TCPConn).CloseWrite()
-		done <- true
+		_, err := io.CopyBuffer(target, client, make([]byte, 8192))
+		if tcpConn, ok := target.Conn.(*net.TCPConn); ok {
+			tcpConn.CloseWrite()
+		}
+		errChan <- err
 	}()
 	go func() {
-		io.CopyBuffer(clientWriter, targetReader, make([]byte, 64*1024))
-		clientWriter.Conn.(*net.TCPConn).CloseWrite()
-		done <- true
+		_, err := io.CopyBuffer(client, target, make([]byte, 8192))
+		if tcpConn, ok := client.Conn.(*net.TCPConn); ok {
+			tcpConn.CloseWrite()
+		}
+		errChan <- err
 	}()
 
-	<-done
-	<-done
+	// Wait for both copies to complete
+	for i := 0; i < 2; i++ {
+		if err := <-errChan; err != nil && err != io.EOF {
+			p.debugLog("Copy error: %v", err)
+		}
+	}
 }
 
 // privacyConn wraps a net.Conn to ensure privacy
 type privacyConn struct {
 	net.Conn
-	localIP     net.IP
-	readBuffer  []byte
-	writeBuffer []byte
+	localIP net.IP
+	buf     []byte
 }
 
 func newPrivacyConn(conn net.Conn, localIP net.IP) *privacyConn {
 	return &privacyConn{
-		Conn:        conn,
-		localIP:     localIP,
-		readBuffer:  make([]byte, 32*1024), // 32KB buffer
-		writeBuffer: make([]byte, 32*1024), // 32KB buffer
+		Conn:    conn,
+		localIP: localIP,
+		buf:     make([]byte, 64*1024), // 64KB buffer
 	}
 }
 
 func (pc *privacyConn) Read(b []byte) (n int, err error) {
-	// Read into our buffer first
-	n, err = pc.Conn.Read(pc.readBuffer[:cap(pc.readBuffer)])
+	n, err = pc.Conn.Read(b)
 	if err != nil || n == 0 {
 		return n, err
 	}
 
-	// Process data if it looks like text
-	data := pc.readBuffer[:n]
-	if isTextData(data) {
-		content := pc.sanitizeContent(string(data))
-		n = copy(b, content)
-	} else {
-		n = copy(b, data)
+	if isTextData(b[:n]) {
+		copy(pc.buf, b[:n])
+		content := pc.sanitizeContent(string(pc.buf[:n]))
+		return copy(b, content), nil
 	}
 
 	return n, nil
@@ -385,23 +382,32 @@ func (pc *privacyConn) Write(b []byte) (n int, err error) {
 		return 0, nil
 	}
 
-	// If data is too large for our buffer, write directly
-	if len(b) > len(pc.writeBuffer) {
-		if isTextData(b) {
-			content := pc.sanitizeContent(string(b))
-			return pc.Conn.Write([]byte(content))
+	if isTextData(b) {
+		content := pc.sanitizeContent(string(b))
+		data := []byte(content)
+
+		// Write in smaller chunks
+		remaining := len(data)
+		written := 0
+		for remaining > 0 {
+			size := remaining
+			if size > 8192 { // 8KB chunks
+				size = 8192
+			}
+			w, err := pc.Conn.Write(data[written : written+size])
+			if err != nil {
+				if written > 0 {
+					return written, nil
+				}
+				return 0, err
+			}
+			written += w
+			remaining -= w
 		}
-		return pc.Conn.Write(b)
+		return len(b), nil
 	}
 
-	// Use buffer for normal writes
-	copy(pc.writeBuffer, b)
-	if isTextData(pc.writeBuffer[:len(b)]) {
-		content := pc.sanitizeContent(string(pc.writeBuffer[:len(b)]))
-		return pc.Conn.Write([]byte(content))
-	}
-
-	return pc.Conn.Write(pc.writeBuffer[:len(b)])
+	return pc.Conn.Write(b)
 }
 
 // isTextData checks if the data appears to be text
@@ -442,7 +448,7 @@ func (pc *privacyConn) sanitizeContent(content string) string {
 }
 
 func (pc *privacyConn) LocalAddr() net.Addr {
-	return &net.TCPAddr{IP: pc.localIP, Port: 0}
+	return &net.TCPAddr{IP: pc.localIP}
 }
 
 // Start starts the HTTPS proxy server
