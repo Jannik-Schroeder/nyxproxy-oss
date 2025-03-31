@@ -190,7 +190,16 @@ func NewProxy(cfg *config.ProxyConfig) (*Proxy, error) {
 		resolver:  createResolver(localAddr, cfg.ProxyProtocol),
 	}
 
+	// Create credentials checker
+	creds := socks5.StaticCredentials{
+		"nyxtrace": cfg.Password,
+	}
+
+	auth := socks5.UserPassAuthenticator{Credentials: creds}
+
 	conf := &socks5.Config{
+		AuthMethods: []socks5.Authenticator{auth},
+		Credentials: creds,
 		Resolver: &customResolver{
 			resolver: proxy.resolver,
 			protocol: cfg.ProxyProtocol,

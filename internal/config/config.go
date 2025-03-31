@@ -20,6 +20,8 @@ type ProxyConfig struct {
 	EnableLogging bool
 	// DebugLevel controls the level of debug output
 	DebugLevel int // 0 = none, 1 = basic, 2 = detailed
+	// Password for proxy authentication
+	Password string
 }
 
 // LoadConfig loads the configuration from environment variables
@@ -31,6 +33,7 @@ func LoadConfig() (*ProxyConfig, error) {
 		ProxyProtocol: getEnvInt("PROXY_PROTOCOL", 4),
 		DebugLevel:    getEnvInt("DEBUG_LEVEL", 0),
 		EnableLogging: getEnvAsBoolOrDefault("PROXY_ENABLE_LOGGING", true),
+		Password:      getEnvString("PROXY_PASSWORD", ""),
 	}
 
 	// Validate proxy type
@@ -41,6 +44,11 @@ func LoadConfig() (*ProxyConfig, error) {
 	// Validate protocol version
 	if cfg.ProxyProtocol != 4 && cfg.ProxyProtocol != 6 {
 		return nil, fmt.Errorf("invalid protocol version: %d (must be 4 or 6)", cfg.ProxyProtocol)
+	}
+
+	// Validate password
+	if cfg.Password == "" {
+		return nil, fmt.Errorf("PROXY_PASSWORD must be set")
 	}
 
 	return cfg, nil

@@ -15,6 +15,8 @@ import (
 	"syscall"
 	"time"
 
+	"encoding/base64"
+
 	"github.com/phanes/nyxtrace/nyxproxy-core/internal/config"
 )
 
@@ -178,8 +180,45 @@ func (p *Proxy) resolveHost(ctx context.Context, host string) (string, error) {
 	return matchingIPs[0].String(), nil
 }
 
+// checkAuth verifies the proxy authentication
+func (p *Proxy) checkAuth(r *http.Request) bool {
+	auth := r.Header.Get("Proxy-Authorization")
+	if auth == "" {
+		return false
+	}
+
+	const prefix = "Basic "
+	if !strings.HasPrefix(auth, prefix) {
+		return false
+	}
+
+	decoded, err := base64.StdEncoding.DecodeString(auth[len(prefix):])
+	if err != nil {
+		return false
+	}
+
+	credentials := strings.SplitN(string(decoded), ":", 2)
+	if len(credentials) != 2 {
+		return false
+	}
+
+	return credentials[0] == "proxy" && credentials[1] == p.config.Password
+}
+
+// requireAuth sends a proxy authentication required response
+func (p *Proxy) requireAuth(w http.ResponseWriter) {
+	w.Header().Set("Proxy-Authenticate", "Basic realm=\"NyxProxy\"")
+	http.Error(w, "Proxy authentication required", http.StatusProxyAuthRequired)
+}
+
 // ServeHTTP implements the http.Handler interface
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// Check authentication first
+	if !p.checkAuth(r) {
+		p.requireAuth(w)
+		return
+	}
+
 	if r.Method == http.MethodConnect {
 		p.handleConnect(w, r)
 	} else {
