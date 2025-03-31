@@ -233,14 +233,6 @@ type bodyReader struct {
 	buf     []byte
 }
 
-func newBodyReader(r io.Reader, localIP net.IP) *bodyReader {
-	return &bodyReader{
-		r:       r,
-		localIP: localIP,
-		buf:     make([]byte, 32*1024),
-	}
-}
-
 func (br *bodyReader) Read(p []byte) (n int, err error) {
 	n, err = br.r.Read(p)
 	if err != nil || n == 0 {
@@ -330,14 +322,6 @@ type privacyReader struct {
 	buf     []byte
 }
 
-func newPrivacyReader(r io.Reader, localIP net.IP) *privacyReader {
-	return &privacyReader{
-		r:       r,
-		localIP: localIP,
-		buf:     make([]byte, 32*1024),
-	}
-}
-
 func (pr *privacyReader) Read(p []byte) (n int, err error) {
 	n, err = pr.r.Read(p)
 	if err != nil || n == 0 {
@@ -385,13 +369,6 @@ func sanitizeContent(content string, localIP net.IP) string {
 type simpleConn struct {
 	net.Conn
 	localIP net.IP
-}
-
-func newSimpleConn(conn net.Conn, localIP net.IP) *simpleConn {
-	return &simpleConn{
-		Conn:    conn,
-		localIP: localIP,
-	}
 }
 
 func (sc *simpleConn) LocalAddr() net.Addr {
@@ -572,63 +549,6 @@ func (p *Proxy) getNextLocalAddr() (net.IP, error) {
 
 	baseIP = baseIP.Mask(net.CIDRMask(64, 128))
 	return getRandomIPv6(baseIP), nil
-}
-
-// dialContext creates a new connection with privacy settings
-func (p *Proxy) dialContext(ctx context.Context, network, addr string) (net.Conn, error) {
-	p.debugLog(2, "=== New Connection ===")
-	p.debugLog(2, "Dialing: network=%s, addr=%s", network, addr)
-
-	host, port, err := net.SplitHostPort(addr)
-	if err != nil {
-		return nil, fmt.Errorf("invalid address format: %v", err)
-	}
-
-	// Get next local IP address
-	localIP, err := p.getNextLocalAddr()
-	if err != nil {
-		return nil, fmt.Errorf("failed to get local IP: %v", err)
-	}
-
-	// Resolve the host
-	resolvedIP, err := p.resolveHost(ctx, host)
-	if err != nil {
-		return nil, err
-	}
-
-	p.debugLog(2, "Local IP: %s, Resolved IP: %s", localIP, resolvedIP)
-
-	// Create dialer with privacy settings
-	dialer := &net.Dialer{
-		LocalAddr: &net.TCPAddr{IP: localIP},
-		Timeout:   30 * time.Second,
-		Control: func(network, address string, c syscall.RawConn) error {
-			return c.Control(func(fd uintptr) {
-				if p.config.ProxyProtocol == 6 {
-					syscall.SetsockoptInt(int(fd), syscall.IPPROTO_IPV6, syscall.IPV6_V6ONLY, 1)
-					syscall.SetsockoptInt(int(fd), syscall.IPPROTO_IPV6, syscall.IPV6_TCLASS, 0)
-				}
-			})
-		},
-	}
-
-	// Use appropriate network type
-	if p.config.ProxyProtocol == 6 {
-		network = "tcp6"
-		dialer.DualStack = false
-	} else {
-		network = "tcp4"
-	}
-
-	// Connect to target
-	conn, err := dialer.DialContext(ctx, network, net.JoinHostPort(resolvedIP, port))
-	if err != nil {
-		p.debugLog(2, "Connection error: %v", err)
-		return nil, err
-	}
-
-	p.debugLog(2, "Connection established: %s -> %s", conn.LocalAddr(), conn.RemoteAddr())
-	return newPrivacyConn(conn, localIP), nil
 }
 
 // isTextData checks if the data appears to be text

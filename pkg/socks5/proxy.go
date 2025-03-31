@@ -165,15 +165,15 @@ func createResolver(localAddr net.IP, protocol int) *net.Resolver {
 		PreferGo: true,
 		Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
 			var dnsServers []string
+			dnsNetwork := "udp6"
 			if protocol == 6 {
-				network = "udp6"
 				dnsServers = []string{
 					"[2001:4860:4860::8888]:53", // Google
 					"[2606:4700:4700::1111]:53", // Cloudflare
 					"[2620:fe::fe]:53",          // Quad9
 				}
 			} else {
-				network = "udp4"
+				dnsNetwork = "udp4"
 				dnsServers = []string{
 					"8.8.8.8:53", // Google
 					"1.1.1.1:53", // Cloudflare
@@ -187,7 +187,7 @@ func createResolver(localAddr net.IP, protocol int) *net.Resolver {
 			}
 
 			for _, dns := range dnsServers {
-				conn, err := dialer.DialContext(ctx, network, dns)
+				conn, err := dialer.DialContext(ctx, dnsNetwork, dns)
 				if err == nil {
 					return conn, nil
 				}
@@ -274,13 +274,12 @@ func NewProxy(cfg *config.ProxyConfig) (*Proxy, error) {
 			}
 
 			// Always use the protocol specified in config
+			dialNetwork := "tcp4"
 			if cfg.ProxyProtocol == 6 {
-				network = "tcp6"
-			} else {
-				network = "tcp4"
+				dialNetwork = "tcp6"
 			}
 
-			return dialer.DialContext(ctx, network, targetAddr)
+			return dialer.DialContext(ctx, dialNetwork, targetAddr)
 		},
 	}
 
