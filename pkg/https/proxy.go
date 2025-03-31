@@ -10,7 +10,6 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
-	"os/exec"
 	"regexp"
 	"strconv"
 	"strings"
@@ -569,97 +568,6 @@ func getRandomIPv6(baseIP net.IP) net.IP {
 	return ip
 }
 
-// getOutboundInterface returns the interface with our IPv6 subnet
-func getOutboundInterface() (*net.Interface, error) {
-	interfaces, err := net.Interfaces()
-	if err != nil {
-		return nil, fmt.Errorf("failed to list interfaces: %v", err)
-	}
-
-	for _, iface := range interfaces {
-		addrs, err := iface.Addrs()
-		if err != nil {
-			continue
-		}
-
-		for _, addr := range addrs {
-			ipNet, ok := addr.(*net.IPNet)
-			if !ok {
-				continue
-			}
-
-			// Look for our /64 subnet
-			if ipNet.IP.To4() == nil && strings.HasPrefix(ipNet.IP.String(), "2a01:4f8:1c1a:cba4") {
-				return &iface, nil
-			}
-		}
-	}
-	return nil, fmt.Errorf("interface with matching IPv6 subnet not found")
-}
-
-// addIPv6ToInterface adds an IPv6 address to the interface
-func addIPv6ToInterface(ip net.IP) error {
-	iface, err := getOutboundInterface()
-	if err != nil {
-		return err
-	}
-
-	// Add the IP address using ip command
-	cmd := fmt.Sprintf("ip addr add %s/128 dev %s", ip.String(), iface.Name)
-	fmt.Printf("Adding IPv6 address with command: %s\n", cmd)
-
-	out, err := exec.Command("ip", "addr", "add", ip.String()+"/128", "dev", iface.Name).CombinedOutput()
-	if err != nil {
-		if !strings.Contains(string(out), "File exists") {
-			return fmt.Errorf("failed to add IPv6 address: %v (%s)", err, string(out))
-		}
-		// If the address already exists, try to remove it first
-		exec.Command("ip", "addr", "del", ip.String()+"/128", "dev", iface.Name).Run()
-		// Try adding it again
-		if out, err := exec.Command("ip", "addr", "add", ip.String()+"/128", "dev", iface.Name).CombinedOutput(); err != nil {
-			return fmt.Errorf("failed to add IPv6 address after removal: %v (%s)", err, string(out))
-		}
-	}
-
-	// Wait for the address to be ready by checking if it exists
-	for i := 0; i < 10; i++ { // Try for up to 1 second
-		addrs, err := iface.Addrs()
-		if err == nil {
-			for _, addr := range addrs {
-				if ipNet, ok := addr.(*net.IPNet); ok {
-					if ipNet.IP.String() == ip.String() {
-						fmt.Printf("IPv6 address %s is now ready on interface %s\n", ip.String(), iface.Name)
-						// Schedule removal after 30 seconds
-						go func() {
-							time.Sleep(30 * time.Second)
-							exec.Command("ip", "addr", "del", ip.String()+"/128", "dev", iface.Name).Run()
-						}()
-						return nil
-					}
-				}
-			}
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-
-	return fmt.Errorf("timeout waiting for IPv6 address to be ready")
-}
-
-// removeIPv6FromInterface removes an IPv6 address from the interface
-func removeIPv6FromInterface(ip net.IP) error {
-	iface, err := getOutboundInterface()
-	if err != nil {
-		return err
-	}
-
-	out, err := exec.Command("ip", "addr", "del", ip.String()+"/128", "dev", iface.Name).CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("failed to remove IPv6 address: %v (%s)", err, string(out))
-	}
-
-	return nil
-}
-
 // getNextLocalAddr returns the next IPv6 address to use
 func (p *Proxy) getNextLocalAddr() (net.IP, error) {
 	if p.config.ProxyProtocol != 6 {
@@ -669,30 +577,14 @@ func (p *Proxy) getNextLocalAddr() (net.IP, error) {
 	// Get base /64 subnet
 	baseIP := p.localAddr.Mask(net.CIDRMask(64, 128))
 
-	// Try up to 5 times to get a working address
-	for i := 0; i < 5; i++ {
-		// Generate random address but avoid ::1 (which might be reserved)
-		newIP := getRandomIPv6(baseIP)
-		if newIP[15] == 1 {
-			newIP[15] = 2
-		}
-
-		fmt.Printf("Trying to add IPv6 address: %s\n", newIP.String())
-
-		// Try to add the IP to the interface
-		if err := addIPv6ToInterface(newIP); err == nil {
-			// The address is now confirmed to be ready
-			return newIP, nil
-		} else {
-			fmt.Printf("Failed to add address %s: %v\n", newIP.String(), err)
-			// Try a different random address
-			continue
-		}
+	// Generate random address but avoid ::1 (which might be reserved)
+	newIP := getRandomIPv6(baseIP)
+	if newIP[15] == 1 {
+		newIP[15] = 2
 	}
 
-	fmt.Printf("Warning: Could not add new IPv6 address, falling back to base address\n")
-	// If we couldn't get a new address, fall back to the base address
-	return p.localAddr, nil
+	fmt.Printf("Using IPv6 address: %s\n", newIP.String())
+	return newIP, nil
 }
 
 // DialContext creates a new connection with privacy settings
