@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"os/exec"
 	"regexp"
 	"strconv"
 	"strings"
@@ -603,33 +604,27 @@ func addIPv6ToInterface(ip net.IP) error {
 		return err
 	}
 
-	// Create a UDP socket for address binding
-	fd, err := syscall.Socket(syscall.AF_INET6, syscall.SOCK_DGRAM, 0)
+	// Add the IP address using ip command
+	cmd := fmt.Sprintf("ip addr add %s/128 dev %s", ip.String(), iface.Name)
+	fmt.Printf("Adding IPv6 address with command: %s\n", cmd)
+
+	out, err := exec.Command("ip", "addr", "add", ip.String()+"/128", "dev", iface.Name).CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("failed to create socket: %v", err)
-	}
-	defer syscall.Close(fd)
-
-	// Set SO_REUSEADDR to allow binding to the same port
-	if err := syscall.SetsockoptInt(fd, syscall.SOL_SOCKET, syscall.SO_REUSEADDR, 1); err != nil {
-		return fmt.Errorf("failed to set SO_REUSEADDR: %v", err)
-	}
-
-	// Create sockaddr_in6 structure
-	var addr syscall.SockaddrInet6
-	copy(addr.Addr[:], ip.To16())
-	addr.Port = 0
-	addr.ZoneId = uint32(iface.Index)
-
-	// Try to bind to the address
-	if err := syscall.Bind(fd, &addr); err != nil {
-		return fmt.Errorf("failed to bind to address: %v", err)
+		if !strings.Contains(string(out), "File exists") {
+			return fmt.Errorf("failed to add IPv6 address: %v (%s)", err, string(out))
+		}
+		// If the address already exists, try to remove it first
+		exec.Command("ip", "addr", "del", ip.String()+"/128", "dev", iface.Name).Run()
+		// Try adding it again
+		if out, err := exec.Command("ip", "addr", "add", ip.String()+"/128", "dev", iface.Name).CombinedOutput(); err != nil {
+			return fmt.Errorf("failed to add IPv6 address after removal: %v (%s)", err, string(out))
+		}
 	}
 
-	// Keep the socket open for a short time to ensure the address is properly added
+	// Schedule removal after 30 seconds
 	go func() {
-		time.Sleep(5 * time.Second)
-		syscall.Close(fd)
+		time.Sleep(30 * time.Second)
+		exec.Command("ip", "addr", "del", ip.String()+"/128", "dev", iface.Name).Run()
 	}()
 
 	return nil
@@ -637,8 +632,16 @@ func addIPv6ToInterface(ip net.IP) error {
 
 // removeIPv6FromInterface removes an IPv6 address from the interface
 func removeIPv6FromInterface(ip net.IP) error {
-	// For now, we'll let the addresses expire naturally
-	// This is safer than forcefully removing them
+	iface, err := getOutboundInterface()
+	if err != nil {
+		return err
+	}
+
+	out, err := exec.Command("ip", "addr", "del", ip.String()+"/128", "dev", iface.Name).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("failed to remove IPv6 address: %v (%s)", err, string(out))
+	}
+
 	return nil
 }
 
@@ -659,7 +662,7 @@ func (p *Proxy) getNextLocalAddr() (net.IP, error) {
 			newIP[15] = 2
 		}
 
-		fmt.Printf("Trying to bind IPv6 address: %s\n", newIP.String())
+		fmt.Printf("Trying to add IPv6 address: %s\n", newIP.String())
 
 		// Try to add the IP to the interface
 		if err := addIPv6ToInterface(newIP); err == nil {
@@ -667,13 +670,13 @@ func (p *Proxy) getNextLocalAddr() (net.IP, error) {
 			time.Sleep(200 * time.Millisecond)
 			return newIP, nil
 		} else {
-			fmt.Printf("Failed to bind address %s: %v\n", newIP.String(), err)
+			fmt.Printf("Failed to add address %s: %v\n", newIP.String(), err)
 			// Try a different random address
 			continue
 		}
 	}
 
-	fmt.Printf("Warning: Could not bind new IPv6 address, falling back to base address\n")
+	fmt.Printf("Warning: Could not add new IPv6 address, falling back to base address\n")
 	// If we couldn't get a new address, fall back to the base address
 	return p.localAddr, nil
 }
