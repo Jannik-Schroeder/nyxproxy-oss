@@ -621,13 +621,28 @@ func addIPv6ToInterface(ip net.IP) error {
 		}
 	}
 
-	// Schedule removal after 30 seconds
-	go func() {
-		time.Sleep(30 * time.Second)
-		exec.Command("ip", "addr", "del", ip.String()+"/128", "dev", iface.Name).Run()
-	}()
+	// Wait for the address to be ready by checking if it exists
+	for i := 0; i < 10; i++ { // Try for up to 1 second
+		addrs, err := iface.Addrs()
+		if err == nil {
+			for _, addr := range addrs {
+				if ipNet, ok := addr.(*net.IPNet); ok {
+					if ipNet.IP.String() == ip.String() {
+						fmt.Printf("IPv6 address %s is now ready on interface %s\n", ip.String(), iface.Name)
+						// Schedule removal after 30 seconds
+						go func() {
+							time.Sleep(30 * time.Second)
+							exec.Command("ip", "addr", "del", ip.String()+"/128", "dev", iface.Name).Run()
+						}()
+						return nil
+					}
+				}
+			}
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
 
-	return nil
+	return fmt.Errorf("timeout waiting for IPv6 address to be ready")
 }
 
 // removeIPv6FromInterface removes an IPv6 address from the interface
@@ -666,8 +681,7 @@ func (p *Proxy) getNextLocalAddr() (net.IP, error) {
 
 		// Try to add the IP to the interface
 		if err := addIPv6ToInterface(newIP); err == nil {
-			// Wait a short time for the address to be ready
-			time.Sleep(200 * time.Millisecond)
+			// The address is now confirmed to be ready
 			return newIP, nil
 		} else {
 			fmt.Printf("Failed to add address %s: %v\n", newIP.String(), err)
