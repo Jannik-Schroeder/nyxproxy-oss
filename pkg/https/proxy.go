@@ -5,11 +5,13 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"math/rand"
 	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -69,74 +71,27 @@ func getOutboundIP(protocol int) (net.IP, error) {
 }
 
 // NewProxy creates a new HTTPS proxy server
-func NewProxy(cfg *config.ProxyConfig) (*Proxy, error) {
-	// Get the appropriate outbound IP
-	localAddr, err := getOutboundIP(cfg.ProxyProtocol)
+func NewProxy(config *config.ProxyConfig) (*Proxy, error) {
+	// Initialize random number generator
+	rand.Seed(time.Now().UnixNano())
+
+	// Get local address for outbound connections
+	localAddr, err := getOutboundIP(config.ProxyProtocol)
 	if err != nil {
-		return nil, fmt.Errorf("failed to determine outbound IP: %v", err)
+		return nil, fmt.Errorf("failed to get outbound IP: %v", err)
 	}
 
-	// Create custom dialer based on protocol version
-	dialer := &net.Dialer{
-		LocalAddr: &net.TCPAddr{IP: localAddr},
-	}
-	if cfg.ProxyProtocol == 6 {
-		dialer.DualStack = false // Force IPv6 only for outbound connections
-	}
-
-	// Create custom DNS resolver
-	resolver := &net.Resolver{
-		PreferGo: true, // Use pure Go resolver
-		Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
-			// Select DNS servers based on protocol version
-			var dnsServers []string
-			if cfg.ProxyProtocol == 6 {
-				network = "udp6"
-				dnsServers = []string{
-					"[2001:4860:4860::8888]:53", // Google DNS IPv6
-					"[2606:4700:4700::1111]:53", // Cloudflare DNS IPv6
-					"[2620:fe::fe]:53",          // Quad9 DNS IPv6
-					"[2620:119:35::35]:53",      // OpenDNS IPv6
-				}
-			} else {
-				network = "udp4"
-				dnsServers = []string{
-					"8.8.8.8:53",        // Google DNS IPv4
-					"1.1.1.1:53",        // Cloudflare DNS IPv4
-					"9.9.9.9:53",        // Quad9 DNS IPv4
-					"208.67.222.222:53", // OpenDNS IPv4
-				}
-			}
-
-			dialerWithLocalAddr := &net.Dialer{
-				LocalAddr: &net.UDPAddr{IP: localAddr},
-			}
-
-			var lastErr error
-			for _, dns := range dnsServers {
-				conn, err := dialerWithLocalAddr.DialContext(ctx, network, dns)
-				if err == nil {
-					return conn, nil
-				}
-				lastErr = err
-			}
-			return nil, fmt.Errorf("all DNS servers failed, last error: %v", lastErr)
-		},
-	}
-
+	// Create proxy instance
 	proxy := &Proxy{
-		config:    cfg,
-		resolver:  resolver,
+		config:    config,
 		localAddr: localAddr,
+		resolver:  &net.Resolver{},
 	}
 
-	// Create the proxy handler
-	handler := http.HandlerFunc(proxy.handleRequest)
-
-	// Create HTTP server
+	// Configure HTTP server
 	proxy.httpServer = &http.Server{
-		Addr:    fmt.Sprintf("%s:%d", cfg.ListenAddress, cfg.ListenPort),
-		Handler: handler,
+		Addr:    net.JoinHostPort(config.ListenAddress, strconv.Itoa(config.ListenPort)),
+		Handler: proxy,
 	}
 
 	return proxy, nil
@@ -180,8 +135,8 @@ func (p *Proxy) resolveHost(ctx context.Context, host string) (string, error) {
 	return matchingIPs[0].String(), nil
 }
 
-// handleRequest handles both CONNECT and regular HTTP requests
-func (p *Proxy) handleRequest(w http.ResponseWriter, r *http.Request) {
+// ServeHTTP implements the http.Handler interface
+func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodConnect {
 		p.handleConnect(w, r)
 	} else {
@@ -360,68 +315,7 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// Create custom transport with strict privacy settings
 	transport := &http.Transport{
-		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-			fmt.Printf("\n=== Connection Debug ===\n")
-			fmt.Printf("Dialing: network=%s, addr=%s\n", network, addr)
-			fmt.Printf("Local IP: %s\n", p.localAddr.String())
-			fmt.Printf("Protocol: IPv%d\n", p.config.ProxyProtocol)
-
-			host, port, err := net.SplitHostPort(addr)
-			if err != nil {
-				return nil, fmt.Errorf("invalid address format: %v", err)
-			}
-
-			// Resolve the host to the correct IP version
-			resolvedIP, err := p.resolveHost(ctx, host)
-			if err != nil {
-				return nil, err
-			}
-			fmt.Printf("Resolved IP: %s\n", resolvedIP)
-
-			// Create a dialer with strict privacy settings
-			dialer := &net.Dialer{
-				LocalAddr: &net.TCPAddr{
-					IP: p.localAddr,
-				},
-				Control: func(network, address string, c syscall.RawConn) error {
-					return c.Control(func(fd uintptr) {
-						fmt.Printf("\n=== Socket Options Debug ===\n")
-						if p.config.ProxyProtocol == 6 {
-							// Force IPv6 only mode
-							err := syscall.SetsockoptInt(int(fd), syscall.IPPROTO_IPV6, syscall.IPV6_V6ONLY, 1)
-							fmt.Printf("Setting IPV6_V6ONLY=1: %v\n", err)
-							// Set traffic class to 0
-							err = syscall.SetsockoptInt(int(fd), syscall.IPPROTO_IPV6, syscall.IPV6_TCLASS, 0)
-							fmt.Printf("Setting IPV6_TCLASS=0: %v\n", err)
-						}
-						// Set IP options to none
-						err := syscall.SetsockoptString(int(fd), syscall.IPPROTO_IP, syscall.IP_OPTIONS, "")
-						fmt.Printf("Setting IP_OPTIONS='': %v\n", err)
-						fmt.Printf("===========================\n")
-					})
-				},
-				Timeout:   30 * time.Second,
-				KeepAlive: -1, // Disable keep-alive completely
-			}
-
-			network = "tcp4"
-			if p.config.ProxyProtocol == 6 {
-				network = "tcp6"
-				dialer.DualStack = false
-			}
-
-			// Connect directly to the target
-			conn, err := dialer.DialContext(ctx, network, net.JoinHostPort(resolvedIP, port))
-			if err != nil {
-				fmt.Printf("Connection error: %v\n", err)
-				return nil, err
-			}
-			fmt.Printf("Connection established: %s -> %s\n", conn.LocalAddr(), conn.RemoteAddr())
-			fmt.Printf("===========================\n")
-
-			// Wrap the connection with our privacy layer
-			return newPrivacyConn(conn, p.localAddr), nil
-		},
+		DialContext:           p.dialContext,
 		ForceAttemptHTTP2:     false,
 		DisableKeepAlives:     true,
 		DisableCompression:    true,
@@ -651,4 +545,96 @@ func (p *Proxy) Start() error {
 // Stop gracefully stops the HTTPS proxy server
 func (p *Proxy) Stop() error {
 	return p.httpServer.Close()
+}
+
+// getRandomIPv6 generates a random IPv6 address within the /64 subnet
+func getRandomIPv6(baseIP net.IP) net.IP {
+	// Make a copy of the base IP
+	ip := make(net.IP, len(baseIP))
+	copy(ip, baseIP)
+
+	// Generate random values for the last 64 bits (8 bytes)
+	for i := 8; i < 16; i++ {
+		ip[i] = byte(rand.Intn(256))
+	}
+
+	return ip
+}
+
+// getNextLocalAddr returns the next IPv6 address to use
+func (p *Proxy) getNextLocalAddr() net.IP {
+	if p.config.ProxyProtocol != 6 {
+		return p.localAddr
+	}
+
+	// Get base /64 subnet
+	baseIP := p.localAddr.Mask(net.CIDRMask(64, 128))
+	return getRandomIPv6(baseIP)
+}
+
+// DialContext creates a new connection with privacy settings
+func (p *Proxy) dialContext(ctx context.Context, network, addr string) (net.Conn, error) {
+	fmt.Printf("\n=== Connection Debug ===\n")
+	fmt.Printf("Dialing: network=%s, addr=%s\n", network, addr)
+
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return nil, fmt.Errorf("invalid address format: %v", err)
+	}
+
+	// Get next local IP address
+	localIP := p.getNextLocalAddr()
+	fmt.Printf("Using Local IP: %s\n", localIP)
+	fmt.Printf("Protocol: IPv%d\n", p.config.ProxyProtocol)
+
+	// Resolve the host to the correct IP version
+	resolvedIP, err := p.resolveHost(ctx, host)
+	if err != nil {
+		return nil, err
+	}
+	fmt.Printf("Resolved IP: %s\n", resolvedIP)
+
+	// Create a dialer with strict privacy settings
+	dialer := &net.Dialer{
+		LocalAddr: &net.TCPAddr{
+			IP: localIP,
+		},
+		Control: func(network, address string, c syscall.RawConn) error {
+			return c.Control(func(fd uintptr) {
+				fmt.Printf("\n=== Socket Options Debug ===\n")
+				if p.config.ProxyProtocol == 6 {
+					// Force IPv6 only mode
+					err := syscall.SetsockoptInt(int(fd), syscall.IPPROTO_IPV6, syscall.IPV6_V6ONLY, 1)
+					fmt.Printf("Setting IPV6_V6ONLY=1: %v\n", err)
+					// Set traffic class to 0
+					err = syscall.SetsockoptInt(int(fd), syscall.IPPROTO_IPV6, syscall.IPV6_TCLASS, 0)
+					fmt.Printf("Setting IPV6_TCLASS=0: %v\n", err)
+				}
+				// Set IP options to none
+				err := syscall.SetsockoptString(int(fd), syscall.IPPROTO_IP, syscall.IP_OPTIONS, "")
+				fmt.Printf("Setting IP_OPTIONS='': %v\n", err)
+				fmt.Printf("===========================\n")
+			})
+		},
+		Timeout:   30 * time.Second,
+		KeepAlive: -1, // Disable keep-alive completely
+	}
+
+	network = "tcp4"
+	if p.config.ProxyProtocol == 6 {
+		network = "tcp6"
+		dialer.DualStack = false
+	}
+
+	// Connect directly to the target
+	conn, err := dialer.DialContext(ctx, network, net.JoinHostPort(resolvedIP, port))
+	if err != nil {
+		fmt.Printf("Connection error: %v\n", err)
+		return nil, err
+	}
+	fmt.Printf("Connection established: %s -> %s\n", conn.LocalAddr(), conn.RemoteAddr())
+	fmt.Printf("===========================\n")
+
+	// Wrap the connection with our privacy layer
+	return newPrivacyConn(conn, localIP), nil
 }
