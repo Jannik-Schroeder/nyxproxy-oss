@@ -3,9 +3,9 @@ package socks5
 import (
 	"context"
 	"fmt"
+	"log"
 	"math/rand"
 	"net"
-	"strings"
 	"syscall"
 	"time"
 
@@ -28,13 +28,20 @@ type customResolver struct {
 }
 
 func (r *customResolver) Resolve(ctx context.Context, name string) (context.Context, net.IP, error) {
-	// If it's already an IP, validate it matches our protocol
+	// If it's already an IP, convert to IPv6 if needed
 	if ip := net.ParseIP(name); ip != nil {
-		isIPv6 := ip.To4() == nil
-		if isIPv6 == (r.protocol == 6) {
+		if r.protocol == 6 {
+			if ip.To4() != nil {
+				// Convert IPv4 to IPv6-mapped address
+				return ctx, getIPv4MappedIPv6(ip), nil
+			}
 			return ctx, ip, nil
 		}
-		return ctx, nil, fmt.Errorf("IP version mismatch: got %s but want IPv%d", name, r.protocol)
+		// For IPv4 mode
+		if ip.To4() != nil {
+			return ctx, ip, nil
+		}
+		return ctx, nil, fmt.Errorf("IPv6 address not allowed in IPv4 mode: %s", name)
 	}
 
 	// Resolve using our protocol-specific resolver
@@ -43,20 +50,29 @@ func (r *customResolver) Resolve(ctx context.Context, name string) (context.Cont
 		return ctx, nil, fmt.Errorf("DNS lookup failed for %s: %v", name, err)
 	}
 
-	// Filter for addresses matching our protocol
-	var matchingIPs []net.IP
-	for _, addr := range addrs {
-		isIPv6 := addr.IP.To4() == nil
-		if isIPv6 == (r.protocol == 6) {
-			matchingIPs = append(matchingIPs, addr.IP)
+	if r.protocol == 6 {
+		// In IPv6 mode, prefer IPv6 addresses but map IPv4 if needed
+		for _, addr := range addrs {
+			if addr.IP.To4() == nil {
+				return ctx, addr.IP, nil
+			}
+		}
+		// If no IPv6 found, use the first IPv4 mapped to IPv6
+		for _, addr := range addrs {
+			if addr.IP.To4() != nil {
+				return ctx, getIPv4MappedIPv6(addr.IP), nil
+			}
+		}
+	} else {
+		// In IPv4 mode, only use IPv4 addresses
+		for _, addr := range addrs {
+			if addr.IP.To4() != nil {
+				return ctx, addr.IP, nil
+			}
 		}
 	}
 
-	if len(matchingIPs) == 0 {
-		return ctx, nil, fmt.Errorf("no IPv%d addresses found for %s", r.protocol, name)
-	}
-
-	return ctx, matchingIPs[0], nil
+	return ctx, nil, fmt.Errorf("no suitable IP addresses found for %s", name)
 }
 
 // getOutboundIP returns the preferred outbound IP for the given protocol
@@ -105,7 +121,7 @@ func getOutboundIP(protocol int) (net.IP, error) {
 // debugLog prints debug messages based on debug level
 func (p *Proxy) debugLog(level int, format string, args ...interface{}) {
 	if p.config.DebugLevel >= level {
-		fmt.Printf(format+"\n", args...)
+		log.Printf(format, args...)
 	}
 }
 
@@ -175,6 +191,19 @@ func createResolver(localAddr net.IP, protocol int) *net.Resolver {
 	}
 }
 
+// getIPv4MappedIPv6 converts an IPv4 address to an IPv4-mapped IPv6 address
+func getIPv4MappedIPv6(ip net.IP) net.IP {
+	if ip.To4() != nil {
+		// Convert IPv4 to IPv4-mapped IPv6
+		ip6 := make(net.IP, 16)
+		copy(ip6[12:], ip.To4())
+		ip6[10] = 0xff
+		ip6[11] = 0xff
+		return ip6
+	}
+	return ip
+}
+
 // NewProxy creates a new SOCKS5 proxy server
 func NewProxy(cfg *config.ProxyConfig) (*Proxy, error) {
 	rand.Seed(time.Now().UnixNano())
@@ -210,7 +239,23 @@ func NewProxy(cfg *config.ProxyConfig) (*Proxy, error) {
 				return nil, fmt.Errorf("failed to get local IP: %v", err)
 			}
 
-			proxy.debugLog(2, "Using local IP: %s for connection to %s", localIP, addr)
+			host, port, err := net.SplitHostPort(addr)
+			if err != nil {
+				return nil, fmt.Errorf("failed to split address: %v", err)
+			}
+
+			// Use our custom resolver to get the right IP version
+			resolver := &customResolver{
+				resolver: proxy.resolver,
+				protocol: cfg.ProxyProtocol,
+			}
+			ctx, resolvedIP, err := resolver.Resolve(ctx, host)
+			if err != nil {
+				return nil, fmt.Errorf("failed to resolve host %s: %v", host, err)
+			}
+
+			targetAddr := net.JoinHostPort(resolvedIP.String(), port)
+			proxy.debugLog(2, "Using local IP: %s for connection to %s (resolved to %s)", localIP, addr, targetAddr)
 
 			dialer := &net.Dialer{
 				LocalAddr: &net.TCPAddr{IP: localIP},
@@ -218,18 +263,20 @@ func NewProxy(cfg *config.ProxyConfig) (*Proxy, error) {
 				Control: func(network, address string, c syscall.RawConn) error {
 					return c.Control(func(fd uintptr) {
 						if cfg.ProxyProtocol == 6 {
-							syscall.SetsockoptInt(int(fd), syscall.IPPROTO_IPV6, syscall.IPV6_V6ONLY, 1)
+							syscall.SetsockoptInt(int(fd), syscall.IPPROTO_IPV6, syscall.IPV6_V6ONLY, 0)
 						}
 					})
 				},
 			}
 
+			// Always use the protocol specified in config
 			if cfg.ProxyProtocol == 6 {
 				network = "tcp6"
 			} else {
 				network = "tcp4"
 			}
-			return dialer.DialContext(ctx, network, addr)
+
+			return dialer.DialContext(ctx, network, targetAddr)
 		},
 	}
 
@@ -258,52 +305,4 @@ func (p *Proxy) Start() error {
 // Stop stops the SOCKS5 proxy server
 func (p *Proxy) Stop() error {
 	return nil
-}
-
-// lookupIPv4 looks up only IPv4 addresses for a given host
-func lookupIPv4(host string) ([]net.IP, error) {
-	ips, err := net.LookupIP(host)
-	if err != nil {
-		return nil, err
-	}
-
-	var ipv4s []net.IP
-	for _, ip := range ips {
-		if ip.To4() != nil {
-			ipv4s = append(ipv4s, ip)
-		}
-	}
-	return ipv4s, nil
-}
-
-// lookupIPv6 looks up only IPv6 addresses for a given host
-func lookupIPv6(host string) ([]net.IP, error) {
-	ips, err := net.LookupIP(host)
-	if err != nil {
-		return nil, err
-	}
-
-	var ipv6s []net.IP
-	for _, ip := range ips {
-		if ip.To4() == nil {
-			ipv6s = append(ipv6s, ip)
-		}
-	}
-	return ipv6s, nil
-}
-
-// validateAddress ensures the address is of the correct IP version
-func validateAddress(addr string, wantIPv6 bool) bool {
-	host := addr
-	if strings.Contains(addr, ":") {
-		host, _, _ = net.SplitHostPort(addr)
-	}
-
-	ip := net.ParseIP(host)
-	if ip == nil {
-		return true // Not an IP address, could be a hostname
-	}
-
-	isIPv6 := strings.Contains(host, ":")
-	return isIPv6 == wantIPv6
 }
