@@ -21,6 +21,44 @@ type Proxy struct {
 	resolver  *net.Resolver
 }
 
+// customResolver implements the socks5.NameResolver interface
+type customResolver struct {
+	resolver *net.Resolver
+	protocol int
+}
+
+func (r *customResolver) Resolve(ctx context.Context, name string) (context.Context, net.IP, error) {
+	// If it's already an IP, validate it matches our protocol
+	if ip := net.ParseIP(name); ip != nil {
+		isIPv6 := ip.To4() == nil
+		if isIPv6 == (r.protocol == 6) {
+			return ctx, ip, nil
+		}
+		return ctx, nil, fmt.Errorf("IP version mismatch: got %s but want IPv%d", name, r.protocol)
+	}
+
+	// Resolve using our protocol-specific resolver
+	addrs, err := r.resolver.LookupIPAddr(ctx, name)
+	if err != nil {
+		return ctx, nil, fmt.Errorf("DNS lookup failed for %s: %v", name, err)
+	}
+
+	// Filter for addresses matching our protocol
+	var matchingIPs []net.IP
+	for _, addr := range addrs {
+		isIPv6 := addr.IP.To4() == nil
+		if isIPv6 == (r.protocol == 6) {
+			matchingIPs = append(matchingIPs, addr.IP)
+		}
+	}
+
+	if len(matchingIPs) == 0 {
+		return ctx, nil, fmt.Errorf("no IPv%d addresses found for %s", r.protocol, name)
+	}
+
+	return ctx, matchingIPs[0], nil
+}
+
 // getOutboundIP returns the preferred outbound IP for the given protocol
 func getOutboundIP(protocol int) (net.IP, error) {
 	interfaces, err := net.Interfaces()
@@ -139,19 +177,20 @@ func NewProxy(cfg *config.ProxyConfig) (*Proxy, error) {
 		return nil, fmt.Errorf("failed to determine outbound IP: %v", err)
 	}
 
+	resolver := createResolver(localAddr, cfg.ProxyProtocol)
+
 	proxy := &Proxy{
 		config:    cfg,
 		localAddr: localAddr,
-		resolver:  createResolver(localAddr, cfg.ProxyProtocol),
+		resolver:  resolver,
 	}
 
 	conf := &socks5.Config{
+		Resolver: &customResolver{
+			resolver: resolver,
+			protocol: cfg.ProxyProtocol,
+		},
 		Dial: func(ctx context.Context, network, addr string) (net.Conn, error) {
-			host, port, err := net.SplitHostPort(addr)
-			if err != nil {
-				return nil, fmt.Errorf("invalid address format: %v", err)
-			}
-
 			// Get next local IP for this connection
 			localIP, err := proxy.getNextLocalAddr()
 			if err != nil {
@@ -179,42 +218,8 @@ func NewProxy(cfg *config.ProxyConfig) (*Proxy, error) {
 				network = "tcp4"
 			}
 
-			// Check if the host is already an IP address
-			if ip := net.ParseIP(host); ip != nil {
-				isIPv6 := ip.To4() == nil
-				if isIPv6 != (cfg.ProxyProtocol == 6) {
-					return nil, fmt.Errorf("IP version mismatch: got %s but want IPv%d", host, cfg.ProxyProtocol)
-				}
-				return dialer.DialContext(ctx, network, addr)
-			}
-
-			// Resolve the host using our protocol-specific resolver
-			var ips []net.IP
-			addrs, err := proxy.resolver.LookupIPAddr(ctx, host)
-			if err != nil {
-				return nil, fmt.Errorf("DNS lookup failed for %s: %v", host, err)
-			}
-
-			// Filter addresses based on protocol
-			for _, addr := range addrs {
-				isIPv6 := addr.IP.To4() == nil
-				if isIPv6 == (cfg.ProxyProtocol == 6) {
-					ips = append(ips, addr.IP)
-				}
-			}
-
-			if len(ips) == 0 {
-				return nil, fmt.Errorf("no IPv%d addresses found for %s", cfg.ProxyProtocol, host)
-			}
-
-			// Connect using the resolved IP
-			targetAddr := net.JoinHostPort(ips[0].String(), port)
-			conn, err := dialer.DialContext(ctx, network, targetAddr)
-			if err != nil {
-				return nil, fmt.Errorf("failed to connect to %s: %v", targetAddr, err)
-			}
-
-			return conn, nil
+			// Connect using the resolved IP and port
+			return dialer.DialContext(ctx, network, addr)
 		},
 	}
 
