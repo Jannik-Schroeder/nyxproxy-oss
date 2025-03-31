@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"os/exec"
 	"regexp"
 	"strconv"
 	"strings"
@@ -153,13 +154,20 @@ func (p *Proxy) handleConnect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Get next local IP address
+	localIP, err := p.getNextLocalAddr()
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to get local IP: %v", err), http.StatusInternalServerError)
+		return
+	}
+
 	// Clean all request headers and connection info
 	r.Header = make(http.Header)
 	r.RemoteAddr = ""
 	r.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
 	r.Header.Set("Accept", "*/*")
 	r.Header.Set("Accept-Encoding", "identity")
-	r.Header.Set("X-Forwarded-For", p.localAddr.String())
+	r.Header.Set("X-Forwarded-For", localIP.String())
 
 	// Resolve the host to the correct IP version
 	resolvedIP, err := p.resolveHost(r.Context(), host)
@@ -171,7 +179,7 @@ func (p *Proxy) handleConnect(w http.ResponseWriter, r *http.Request) {
 	// Create custom dialer for the target connection with strict socket options
 	dialer := &net.Dialer{
 		LocalAddr: &net.TCPAddr{
-			IP: p.localAddr,
+			IP: localIP,
 		},
 		Control: func(network, address string, c syscall.RawConn) error {
 			return c.Control(func(fd uintptr) {
@@ -222,7 +230,7 @@ func (p *Proxy) handleConnect(w http.ResponseWriter, r *http.Request) {
 	response := []string{
 		"HTTP/1.1 200 Connection Established",
 		"Proxy-Agent: NyxProxy",
-		"X-Forwarded-For: " + p.localAddr.String(),
+		"X-Forwarded-For: " + localIP.String(),
 		"",
 		"",
 	}
@@ -234,8 +242,8 @@ func (p *Proxy) handleConnect(w http.ResponseWriter, r *http.Request) {
 	// Create a clean pipe with buffer and privacy wrapper
 	clientReader := io.Reader(clientConn)
 	clientWriter := io.Writer(clientConn)
-	targetReader := io.Reader(newPrivacyConn(targetConn, p.localAddr))
-	targetWriter := io.Writer(newPrivacyConn(targetConn, p.localAddr))
+	targetReader := io.Reader(newPrivacyConn(targetConn, localIP))
+	targetWriter := io.Writer(newPrivacyConn(targetConn, localIP))
 
 	// Start bidirectional copy with clean pipe
 	done := make(chan bool, 2)
@@ -561,15 +569,93 @@ func getRandomIPv6(baseIP net.IP) net.IP {
 	return ip
 }
 
+// addIPv6ToInterface adds an IPv6 address to the interface
+func addIPv6ToInterface(ip net.IP) error {
+	// Find the interface with our base IPv6 address
+	interfaces, err := net.Interfaces()
+	if err != nil {
+		return fmt.Errorf("failed to list interfaces: %v", err)
+	}
+
+	for _, iface := range interfaces {
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+
+		for _, addr := range addrs {
+			ipNet, ok := addr.(*net.IPNet)
+			if !ok {
+				continue
+			}
+
+			// Look for our /64 subnet
+			if ipNet.IP.To4() == nil && strings.HasPrefix(ipNet.IP.String(), "2a01:4f8:1c1a:cba4") {
+				// Found our interface, add the new IP
+				cmd := exec.Command("ip", "addr", "add", ip.String()+"/64", "dev", iface.Name)
+				if err := cmd.Run(); err != nil {
+					return fmt.Errorf("failed to add IPv6 address: %v", err)
+				}
+				return nil
+			}
+		}
+	}
+	return fmt.Errorf("interface with matching IPv6 subnet not found")
+}
+
+// removeIPv6FromInterface removes an IPv6 address from the interface
+func removeIPv6FromInterface(ip net.IP) error {
+	interfaces, err := net.Interfaces()
+	if err != nil {
+		return fmt.Errorf("failed to list interfaces: %v", err)
+	}
+
+	for _, iface := range interfaces {
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+
+		for _, addr := range addrs {
+			ipNet, ok := addr.(*net.IPNet)
+			if !ok {
+				continue
+			}
+
+			if ipNet.IP.To4() == nil && strings.HasPrefix(ipNet.IP.String(), "2a01:4f8:1c1a:cba4") {
+				cmd := exec.Command("ip", "addr", "del", ip.String()+"/64", "dev", iface.Name)
+				if err := cmd.Run(); err != nil {
+					return fmt.Errorf("failed to remove IPv6 address: %v", err)
+				}
+				return nil
+			}
+		}
+	}
+	return fmt.Errorf("interface with matching IPv6 subnet not found")
+}
+
 // getNextLocalAddr returns the next IPv6 address to use
-func (p *Proxy) getNextLocalAddr() net.IP {
+func (p *Proxy) getNextLocalAddr() (net.IP, error) {
 	if p.config.ProxyProtocol != 6 {
-		return p.localAddr
+		return p.localAddr, nil
 	}
 
 	// Get base /64 subnet
 	baseIP := p.localAddr.Mask(net.CIDRMask(64, 128))
-	return getRandomIPv6(baseIP)
+	newIP := getRandomIPv6(baseIP)
+
+	// Add the IP to the interface
+	if err := addIPv6ToInterface(newIP); err != nil {
+		return nil, fmt.Errorf("failed to add IPv6 address: %v", err)
+	}
+
+	// Schedule removal after a delay
+	go func(ip net.IP) {
+		time.Sleep(30 * time.Second)
+		removeIPv6FromInterface(ip)
+	}(newIP)
+
+	return newIP, nil
 }
 
 // DialContext creates a new connection with privacy settings
@@ -583,7 +669,10 @@ func (p *Proxy) dialContext(ctx context.Context, network, addr string) (net.Conn
 	}
 
 	// Get next local IP address
-	localIP := p.getNextLocalAddr()
+	localIP, err := p.getNextLocalAddr()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get local IP: %v", err)
+	}
 	fmt.Printf("Using Local IP: %s\n", localIP)
 	fmt.Printf("Protocol: IPv%d\n", p.config.ProxyProtocol)
 
