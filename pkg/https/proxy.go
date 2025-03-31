@@ -603,12 +603,17 @@ func addIPv6ToInterface(ip net.IP) error {
 		return err
 	}
 
-	// Create a UDP socket and bind it to test the address
-	testFd, err := syscall.Socket(syscall.AF_INET6, syscall.SOCK_DGRAM, 0)
+	// Create a UDP socket for address binding
+	fd, err := syscall.Socket(syscall.AF_INET6, syscall.SOCK_DGRAM, 0)
 	if err != nil {
-		return fmt.Errorf("failed to create test socket: %v", err)
+		return fmt.Errorf("failed to create socket: %v", err)
 	}
-	defer syscall.Close(testFd)
+	defer syscall.Close(fd)
+
+	// Set SO_REUSEADDR to allow binding to the same port
+	if err := syscall.SetsockoptInt(fd, syscall.SOL_SOCKET, syscall.SO_REUSEADDR, 1); err != nil {
+		return fmt.Errorf("failed to set SO_REUSEADDR: %v", err)
+	}
 
 	// Create sockaddr_in6 structure
 	var addr syscall.SockaddrInet6
@@ -617,10 +622,15 @@ func addIPv6ToInterface(ip net.IP) error {
 	addr.ZoneId = uint32(iface.Index)
 
 	// Try to bind to the address
-	err = syscall.Bind(testFd, &addr)
-	if err != nil {
+	if err := syscall.Bind(fd, &addr); err != nil {
 		return fmt.Errorf("failed to bind to address: %v", err)
 	}
+
+	// Keep the socket open for a short time to ensure the address is properly added
+	go func() {
+		time.Sleep(5 * time.Second)
+		syscall.Close(fd)
+	}()
 
 	return nil
 }
@@ -643,16 +653,27 @@ func (p *Proxy) getNextLocalAddr() (net.IP, error) {
 
 	// Try up to 5 times to get a working address
 	for i := 0; i < 5; i++ {
+		// Generate random address but avoid ::1 (which might be reserved)
 		newIP := getRandomIPv6(baseIP)
+		if newIP[15] == 1 {
+			newIP[15] = 2
+		}
+
+		fmt.Printf("Trying to bind IPv6 address: %s\n", newIP.String())
 
 		// Try to add the IP to the interface
 		if err := addIPv6ToInterface(newIP); err == nil {
 			// Wait a short time for the address to be ready
-			time.Sleep(100 * time.Millisecond)
+			time.Sleep(200 * time.Millisecond)
 			return newIP, nil
+		} else {
+			fmt.Printf("Failed to bind address %s: %v\n", newIP.String(), err)
+			// Try a different random address
+			continue
 		}
 	}
 
+	fmt.Printf("Warning: Could not bind new IPv6 address, falling back to base address\n")
 	// If we couldn't get a new address, fall back to the base address
 	return p.localAddr, nil
 }
