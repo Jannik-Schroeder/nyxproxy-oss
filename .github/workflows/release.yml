@@ -1,0 +1,116 @@
+name: Release NyxProxy Core
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'go.mod'
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  check-version:
+    if: '!startsWith(github.ref, "refs/tags/")'
+    runs-on: ubuntu-latest
+    outputs:
+      should_release: ${{ steps.check_mod.outputs.should_release }}
+      new_tag: ${{ steps.check_mod.outputs.new_tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check go.mod changes
+        id: check_mod
+        run: |
+          # Get the current commit and previous commit
+          CURRENT_COMMIT=${{ github.sha }}
+          PREVIOUS_COMMIT=$(git rev-parse HEAD^1)
+          
+          # Get Go versions
+          CURRENT_VERSION=$(grep -E '^go [0-9]+\.[0-9]+' go.mod | cut -d' ' -f2)
+          PREVIOUS_VERSION=$(git show $PREVIOUS_COMMIT:go.mod | grep -E '^go [0-9]+\.[0-9]+' | cut -d' ' -f2)
+          
+          if [ "$CURRENT_VERSION" != "$PREVIOUS_VERSION" ]; then
+            echo "Go version changed from $PREVIOUS_VERSION to $CURRENT_VERSION"
+            echo "should_release=true" >> $GITHUB_OUTPUT
+            
+            # Get latest tag
+            latest_tag=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")
+            version=${latest_tag#v}
+            IFS='.' read -r major minor patch <<< "$version"
+            
+            # Increment minor version for Go version changes
+            new_tag="v${major}.$((minor + 1)).0"
+            echo "new_tag=${new_tag}" >> $GITHUB_OUTPUT
+          else
+            echo "No Go version change detected"
+            echo "should_release=false" >> $GITHUB_OUTPUT
+          fi
+
+  create-tag:
+    needs: [check-version]
+    if: needs.check-version.outputs.should_release == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      
+      - name: Create and push tag
+        run: |
+          new_tag=${{ needs.check-version.outputs.new_tag }}
+          git config user.name "GitHub Actions"
+          git config user.email "actions@github.com"
+          git tag -a ${new_tag} -m "Release ${new_tag} - Go version update"
+          git push origin ${new_tag}
+
+  build-and-release:
+    needs: [check-version, create-tag]
+    if: always() && (startsWith(github.ref, 'refs/tags/') || (needs.check-version.outputs.should_release == 'true' && needs.create-tag.result == 'success'))
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Get Go version from go.mod
+        id: go_version
+        run: |
+          GO_VERSION=$(grep -E '^go [0-9]+\.[0-9]+' go.mod | cut -d' ' -f2)
+          echo "version=${GO_VERSION}" >> $GITHUB_OUTPUT
+
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: ${{ steps.go_version.outputs.version }}
+
+      - name: Build for multiple platforms
+        run: |
+          # Create dist directory
+          mkdir -p dist
+          
+          # Build for Linux
+          GOOS=linux GOARCH=amd64 go build -o dist/nyxproxy-linux-amd64 ./cmd/proxy
+          GOOS=linux GOARCH=arm64 go build -o dist/nyxproxy-linux-arm64 ./cmd/proxy
+          
+          # Build for macOS
+          GOOS=darwin GOARCH=amd64 go build -o dist/nyxproxy-darwin-amd64 ./cmd/proxy
+          GOOS=darwin GOARCH=arm64 go build -o dist/nyxproxy-darwin-arm64 ./cmd/proxy
+          
+          # Build for Windows
+          GOOS=windows GOARCH=amd64 go build -o dist/nyxproxy-windows-amd64.exe ./cmd/proxy
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ github.ref_name }}
+          files: |
+            dist/nyxproxy-linux-amd64
+            dist/nyxproxy-linux-arm64
+            dist/nyxproxy-darwin-amd64
+            dist/nyxproxy-darwin-arm64
+            dist/nyxproxy-windows-amd64.exe
+          generate_release_notes: true 
