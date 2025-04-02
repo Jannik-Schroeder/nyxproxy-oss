@@ -2,23 +2,17 @@ name: Release NyxProxy Core
 
 on:
   push:
-    branches:
-      - main
     paths:
       - 'go.mod'
-    tags:
-      - 'v*'
+    tags-ignore:
+      - '**'
 
 permissions:
   contents: write
 
 jobs:
-  check-version:
-    if: '!startsWith(github.ref, "refs/tags/")'
+  check-and-release:
     runs-on: ubuntu-latest
-    outputs:
-      should_release: ${{ steps.check_mod.outputs.should_release }}
-      new_tag: ${{ steps.check_mod.outputs.new_tag }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -37,66 +31,37 @@ jobs:
           
           if [ "$CURRENT_VERSION" != "$PREVIOUS_VERSION" ]; then
             echo "Go version changed from $PREVIOUS_VERSION to $CURRENT_VERSION"
-            echo "should_release=true" >> $GITHUB_OUTPUT
             
             # Get latest tag
             latest_tag=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")
             version=${latest_tag#v}
             IFS='.' read -r major minor patch <<< "$version"
             
-            # Increment minor version for Go version changes
+            # Create new version
             new_tag="v${major}.$((minor + 1)).0"
             echo "new_tag=${new_tag}" >> $GITHUB_OUTPUT
+            echo "should_release=true" >> $GITHUB_OUTPUT
+            
+            # Create and push tag
+            git config user.name "GitHub Actions"
+            git config user.email "actions@github.com"
+            git tag -a ${new_tag} -m "Release ${new_tag} - Go version update to ${CURRENT_VERSION}"
+            git push origin ${new_tag}
           else
             echo "No Go version change detected"
             echo "should_release=false" >> $GITHUB_OUTPUT
           fi
 
-  create-tag:
-    needs: [check-version]
-    if: needs.check-version.outputs.should_release == 'true'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      
-      - name: Create and push tag
-        run: |
-          new_tag=${{ needs.check-version.outputs.new_tag }}
-          git config user.name "GitHub Actions"
-          git config user.email "actions@github.com"
-          git tag -a ${new_tag} -m "Release ${new_tag} - Go version update"
-          git push origin ${new_tag}
-
-  build-and-release:
-    needs: [check-version, create-tag]
-    if: always() && (startsWith(github.ref, 'refs/tags/') || (needs.check-version.outputs.should_release == 'true' && needs.create-tag.result == 'success'))
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Get Go version from go.mod
-        id: go_version
-        run: |
-          GO_VERSION=$(grep -E '^go [0-9]+\.[0-9]+' go.mod | cut -d' ' -f2)
-          echo "version=${GO_VERSION}" >> $GITHUB_OUTPUT
-
       - name: Set up Go
+        if: steps.check_mod.outputs.should_release == 'true'
         uses: actions/setup-go@v4
         with:
-          go-version: ${{ steps.go_version.outputs.version }}
-
-      - name: Get version from tag
-        id: get_version
-        run: |
-          VERSION=${GITHUB_REF#refs/tags/v}
-          echo "version=${VERSION}" >> $GITHUB_OUTPUT
-          echo "Version: ${VERSION}"
+          go-version-file: 'go.mod'
 
       - name: Build for multiple platforms
+        if: steps.check_mod.outputs.should_release == 'true'
         env:
-          VERSION: ${{ steps.get_version.outputs.version }}
+          VERSION: ${{ steps.check_mod.outputs.new_tag }}
           COMMIT: ${{ github.sha }}
           BUILD_TIME: ${{ github.event.repository.updated_at }}
         run: |
@@ -104,7 +69,7 @@ jobs:
           mkdir -p dist
           
           # Build flags
-          BUILD_FLAGS="-X github.com/phanes/nyxtrace/nyxproxy-core/pkg/version.Version=${VERSION}"
+          BUILD_FLAGS="-X github.com/phanes/nyxtrace/nyxproxy-core/pkg/version.Version=${VERSION#v}"
           BUILD_FLAGS="${BUILD_FLAGS} -X github.com/phanes/nyxtrace/nyxproxy-core/pkg/version.Commit=${COMMIT}"
           BUILD_FLAGS="${BUILD_FLAGS} -X github.com/phanes/nyxtrace/nyxproxy-core/pkg/version.BuildTime=${BUILD_TIME}"
           
@@ -120,8 +85,10 @@ jobs:
           GOOS=windows GOARCH=amd64 go build -ldflags "${BUILD_FLAGS}" -o dist/nyxproxy-windows-amd64.exe ./cmd/proxy
 
       - name: Create Release
+        if: steps.check_mod.outputs.should_release == 'true'
         uses: softprops/action-gh-release@v1
         with:
+          tag_name: ${{ steps.check_mod.outputs.new_tag }}
           files: |
             dist/nyxproxy-linux-amd64
             dist/nyxproxy-linux-arm64
