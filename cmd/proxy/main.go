@@ -1,6 +1,7 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 	"log"
 	"os"
@@ -10,9 +11,20 @@ import (
 	"github.com/phanes/nyxtrace/nyxproxy-core/internal/config"
 	"github.com/phanes/nyxtrace/nyxproxy-core/pkg/https"
 	"github.com/phanes/nyxtrace/nyxproxy-core/pkg/socks5"
+	"github.com/phanes/nyxtrace/nyxproxy-core/pkg/version"
 )
 
 func main() {
+	// Version flag
+	showVersion := flag.Bool("version", false, "Show version information")
+	flag.Parse()
+
+	// Show version if requested
+	if *showVersion {
+		fmt.Println("NyxProxy Core", version.GetVersionInfo())
+		os.Exit(0)
+	}
+
 	// Load configuration
 	cfg, err := config.LoadConfig()
 	if err != nil {

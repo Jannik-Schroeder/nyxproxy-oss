@@ -87,26 +87,41 @@ jobs:
         with:
           go-version: ${{ steps.go_version.outputs.version }}
 
+      - name: Get version from tag
+        id: get_version
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/v}
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+          echo "Version: ${VERSION}"
+
       - name: Build for multiple platforms
+        env:
+          VERSION: ${{ steps.get_version.outputs.version }}
+          COMMIT: ${{ github.sha }}
+          BUILD_TIME: ${{ github.event.repository.updated_at }}
         run: |
           # Create dist directory
           mkdir -p dist
           
+          # Build flags
+          BUILD_FLAGS="-X github.com/phanes/nyxtrace/nyxproxy-core/pkg/version.Version=${VERSION}"
+          BUILD_FLAGS="${BUILD_FLAGS} -X github.com/phanes/nyxtrace/nyxproxy-core/pkg/version.Commit=${COMMIT}"
+          BUILD_FLAGS="${BUILD_FLAGS} -X github.com/phanes/nyxtrace/nyxproxy-core/pkg/version.BuildTime=${BUILD_TIME}"
+          
           # Build for Linux
-          GOOS=linux GOARCH=amd64 go build -o dist/nyxproxy-linux-amd64 ./cmd/proxy
-          GOOS=linux GOARCH=arm64 go build -o dist/nyxproxy-linux-arm64 ./cmd/proxy
+          GOOS=linux GOARCH=amd64 go build -ldflags "${BUILD_FLAGS}" -o dist/nyxproxy-linux-amd64 ./cmd/proxy
+          GOOS=linux GOARCH=arm64 go build -ldflags "${BUILD_FLAGS}" -o dist/nyxproxy-linux-arm64 ./cmd/proxy
           
           # Build for macOS
-          GOOS=darwin GOARCH=amd64 go build -o dist/nyxproxy-darwin-amd64 ./cmd/proxy
-          GOOS=darwin GOARCH=arm64 go build -o dist/nyxproxy-darwin-arm64 ./cmd/proxy
+          GOOS=darwin GOARCH=amd64 go build -ldflags "${BUILD_FLAGS}" -o dist/nyxproxy-darwin-amd64 ./cmd/proxy
+          GOOS=darwin GOARCH=arm64 go build -ldflags "${BUILD_FLAGS}" -o dist/nyxproxy-darwin-arm64 ./cmd/proxy
           
           # Build for Windows
-          GOOS=windows GOARCH=amd64 go build -o dist/nyxproxy-windows-amd64.exe ./cmd/proxy
+          GOOS=windows GOARCH=amd64 go build -ldflags "${BUILD_FLAGS}" -o dist/nyxproxy-windows-amd64.exe ./cmd/proxy
 
       - name: Create Release
         uses: softprops/action-gh-release@v1
         with:
-          tag_name: ${{ github.ref_name }}
           files: |
             dist/nyxproxy-linux-amd64
             dist/nyxproxy-linux-arm64
