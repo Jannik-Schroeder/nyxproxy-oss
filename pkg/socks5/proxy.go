@@ -309,3 +309,38 @@ func (p *Proxy) Start() error {
 func (p *Proxy) Stop() error {
 	return nil
 }
+
+// setSocketOptions sets socket options for Linux
+func setSocketOptions(fd uintptr) error {
+	if err := syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_REUSEADDR, 1); err != nil {
+		return fmt.Errorf("failed to set SO_REUSEADDR: %v", err)
+	}
+	return nil
+}
+
+func (p *Proxy) handleConnection(conn net.Conn) {
+	// ... existing code ...
+
+	// Get the underlying file descriptor
+	tcpConn, ok := conn.(*net.TCPConn)
+	if !ok {
+		log.Printf("Connection is not TCP")
+		return
+	}
+
+	// Get raw connection
+	raw, err := tcpConn.SyscallConn()
+	if err != nil {
+		log.Printf("Failed to get raw connection: %v", err)
+		return
+	}
+
+	// Set socket options
+	raw.Control(func(fd uintptr) {
+		if err := setSocketOptions(fd); err != nil {
+			log.Printf("Failed to set socket options: %v", err)
+		}
+	})
+
+	// ... existing code ...
+}
