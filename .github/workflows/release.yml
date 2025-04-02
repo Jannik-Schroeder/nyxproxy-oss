@@ -2,66 +2,26 @@ name: Release NyxProxy Core
 
 on:
   push:
-    paths:
-      - 'go.mod'
-    tags-ignore:
-      - '**'
+    tags:
+      - 'v*'
 
 permissions:
   contents: write
 
 jobs:
-  check-and-release:
+  build-and-release:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Check go.mod changes
-        id: check_mod
-        run: |
-          # Get the current commit and previous commit
-          CURRENT_COMMIT=${{ github.sha }}
-          PREVIOUS_COMMIT=$(git rev-parse HEAD^1)
-          
-          # Get Go versions
-          CURRENT_VERSION=$(grep -E '^go [0-9]+\.[0-9]+' go.mod | cut -d' ' -f2)
-          PREVIOUS_VERSION=$(git show $PREVIOUS_COMMIT:go.mod | grep -E '^go [0-9]+\.[0-9]+' | cut -d' ' -f2)
-          
-          if [ "$CURRENT_VERSION" != "$PREVIOUS_VERSION" ]; then
-            echo "Go version changed from $PREVIOUS_VERSION to $CURRENT_VERSION"
-            
-            # Get latest tag
-            latest_tag=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")
-            version=${latest_tag#v}
-            IFS='.' read -r major minor patch <<< "$version"
-            
-            # Create new version
-            new_tag="v${major}.$((minor + 1)).0"
-            echo "new_tag=${new_tag}" >> $GITHUB_OUTPUT
-            echo "should_release=true" >> $GITHUB_OUTPUT
-            
-            # Create and push tag
-            git config user.name "GitHub Actions"
-            git config user.email "actions@github.com"
-            git tag -a ${new_tag} -m "Release ${new_tag} - Go version update to ${CURRENT_VERSION}"
-            git push origin ${new_tag}
-          else
-            echo "No Go version change detected"
-            echo "should_release=false" >> $GITHUB_OUTPUT
-          fi
 
       - name: Set up Go
-        if: steps.check_mod.outputs.should_release == 'true'
         uses: actions/setup-go@v4
         with:
           go-version-file: 'go.mod'
 
       - name: Build for multiple platforms
-        if: steps.check_mod.outputs.should_release == 'true'
         env:
-          VERSION: ${{ steps.check_mod.outputs.new_tag }}
+          VERSION: ${{ github.ref_name }}
           COMMIT: ${{ github.sha }}
           BUILD_TIME: ${{ github.event.repository.updated_at }}
         run: |
@@ -85,10 +45,8 @@ jobs:
           GOOS=windows GOARCH=amd64 go build -ldflags "${BUILD_FLAGS}" -o dist/nyxproxy-windows-amd64.exe ./cmd/proxy
 
       - name: Create Release
-        if: steps.check_mod.outputs.should_release == 'true'
         uses: softprops/action-gh-release@v1
         with:
-          tag_name: ${{ steps.check_mod.outputs.new_tag }}
           files: |
             dist/nyxproxy-linux-amd64
             dist/nyxproxy-linux-arm64
