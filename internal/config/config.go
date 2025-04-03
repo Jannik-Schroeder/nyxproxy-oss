@@ -22,6 +22,14 @@ type ProxyConfig struct {
 	DebugLevel int // 0 = none, 1 = basic, 2 = detailed
 	// Password for proxy authentication
 	Password string
+
+	// --- Health Check Configuration ---
+	// NyxTraceApiUrl is the base URL for the NyxTrace API
+	NyxTraceApiUrl string
+	// ProxyId is the unique identifier for this proxy instance
+	ProxyId string
+	// HealthCheckToken is the token used to authenticate heartbeat requests
+	HealthCheckToken string
 }
 
 // LoadConfig loads the configuration from environment variables
@@ -29,11 +37,16 @@ func LoadConfig() (*ProxyConfig, error) {
 	cfg := &ProxyConfig{
 		ListenAddress: getEnvString("PROXY_LISTEN_ADDRESS", "0.0.0.0"),
 		ListenPort:    getEnvInt("PROXY_LISTEN_PORT", 8080),
-		ProxyType:     getEnvString("PROXY_TYPE", "https"),
+		ProxyType:     getEnvString("PROXY_TYPE", "https"), // Default to https as socks5 needs password
 		ProxyProtocol: getEnvInt("PROXY_PROTOCOL", 4),
 		DebugLevel:    getEnvInt("DEBUG_LEVEL", 0),
 		EnableLogging: getEnvAsBoolOrDefault("PROXY_ENABLE_LOGGING", true),
-		Password:      getEnvString("PROXY_PASSWORD", ""),
+		Password:      getEnvString("PROXY_PASSWORD", ""), // Read password, validation below
+
+		// Load health check config
+		NyxTraceApiUrl:   getEnvString("NYXTRACE_API_URL", ""),
+		ProxyId:          getEnvString("PROXY_ID", ""),
+		HealthCheckToken: getEnvString("HEALTHCHECK_TOKEN", ""),
 	}
 
 	// Validate proxy type
@@ -46,9 +59,20 @@ func LoadConfig() (*ProxyConfig, error) {
 		return nil, fmt.Errorf("invalid protocol version: %d (must be 4 or 6)", cfg.ProxyProtocol)
 	}
 
-	// Validate password
-	if cfg.Password == "" {
-		return nil, fmt.Errorf("PROXY_PASSWORD must be set")
+	// Validate password if socks5 is chosen (HTTPS doesn't use this field directly for proxy auth)
+	if cfg.ProxyType == "socks5" && cfg.Password == "" {
+		return nil, fmt.Errorf("PROXY_PASSWORD must be set when PROXY_TYPE is 'socks5'")
+	}
+
+	// Validate health check configuration
+	if cfg.NyxTraceApiUrl == "" {
+		return nil, fmt.Errorf("NYXTRACE_API_URL environment variable must be set")
+	}
+	if cfg.ProxyId == "" {
+		return nil, fmt.Errorf("PROXY_ID environment variable must be set")
+	}
+	if cfg.HealthCheckToken == "" {
+		return nil, fmt.Errorf("HEALTHCHECK_TOKEN environment variable must be set")
 	}
 
 	return cfg, nil
