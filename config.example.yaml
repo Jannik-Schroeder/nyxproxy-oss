@@ -1,0 +1,41 @@
+# NyxProxy-OSS Configuration Example
+# Copy this file to config.yaml and adjust the settings
+
+proxy:
+  # Proxy type: socks5 or https
+  type: socks5
+
+  # Address to listen on (0.0.0.0 for all interfaces)
+  listen_address: 0.0.0.0
+
+  # Port to listen on (common: 1080 for SOCKS5, 8080 for HTTPS)
+  listen_port: 1080
+
+  # Authentication credentials (required)
+  username: admin
+  password: change_me_please
+
+network:
+  # Network interface to use for outgoing connections
+  # Leave empty to auto-detect or use "setup" command
+  interface_name: ""
+
+  # Enable IPv4 for outgoing connections
+  ipv4_enabled: true
+
+  # Enable IPv6 for outgoing connections
+  ipv6_enabled: false
+
+monitoring:
+  # Enable monitoring endpoint
+  enabled: true
+
+  # Port for monitoring endpoint
+  port: 9090
+
+  # Allow remote access to monitoring (false = localhost only)
+  allow_remote: false
+
+logging:
+  # Debug level: 0 = none, 1 = basic, 2 = detailed
+  debug_level: 1

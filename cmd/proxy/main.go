@@ -1,8 +1,6 @@
 package main
 
 import (
-	"bytes"
-	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
@@ -10,17 +8,13 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
-	"time"
 
-	"github.com/phanes/nyxtrace/nyxproxy-core/internal/config"
-	"github.com/phanes/nyxtrace/nyxproxy-core/pkg/https"
-	"github.com/phanes/nyxtrace/nyxproxy-core/pkg/socks5"
-	"github.com/phanes/nyxtrace/nyxproxy-core/pkg/version"
-)
-
-const (
-	heartbeatInterval = 60 * time.Second
-	heartbeatTimeout  = 10 * time.Second
+	"github.com/jannik-schroeder/nyxproxy-oss/internal/config"
+	"github.com/jannik-schroeder/nyxproxy-oss/pkg/https"
+	"github.com/jannik-schroeder/nyxproxy-oss/pkg/metrics"
+	"github.com/jannik-schroeder/nyxproxy-oss/pkg/monitoring"
+	"github.com/jannik-schroeder/nyxproxy-oss/pkg/socks5"
+	"github.com/jannik-schroeder/nyxproxy-oss/pkg/version"
 )
 
 func main() {
@@ -40,8 +34,22 @@ func main() {
 		log.Fatalf("Failed to load configuration: %v", err)
 	}
 
-	// Start heartbeat sender in a background goroutine
-	go startHeartbeatSender(cfg)
+	// Create metrics collector
+	interfaceName := cfg.Network.InterfaceName
+	if interfaceName == "" {
+		interfaceName = "auto-detect"
+	}
+	metricsCollector := metrics.New(interfaceName)
+
+	// Start monitoring server if enabled
+	if cfg.Monitoring.Enabled {
+		monitoringServer := monitoring.New(cfg, metricsCollector, version.GetVersionInfo())
+		go func() {
+			if err := monitoringServer.Start(); err != nil && err != http.ErrServerClosed {
+				log.Printf("Monitoring server error: %v", err)
+			}
+		}()
+	}
 
 	// Create proxy based on type
 	var proxy interface {
@@ -69,10 +77,10 @@ func main() {
 	errChan := make(chan error, 1)
 	go func() {
 		log.Printf("Starting %s proxy on %s:%d (Protocol: IPv%d)",
-			cfg.ProxyType,
-			cfg.ListenAddress,
-			cfg.ListenPort,
-			cfg.ProxyProtocol)
+			cfg.GetProxyType(),
+			cfg.GetListenAddress(),
+			cfg.GetListenPort(),
+			cfg.GetProxyProtocol())
 
 		if err := proxy.Start(); err != nil {
 			errChan <- fmt.Errorf("proxy error: %v", err)
@@ -92,65 +100,5 @@ func main() {
 		if err := stoppable.Stop(); err != nil {
 			log.Printf("Error stopping proxy: %v", err)
 		}
-	}
-}
-
-// startHeartbeatSender sends periodic heartbeats to the NyxTrace API
-func startHeartbeatSender(cfg *config.ProxyConfig) {
-	ticker := time.NewTicker(heartbeatInterval)
-	defer ticker.Stop()
-
-	// Create a reusable HTTP client
-	client := &http.Client{
-		Timeout: heartbeatTimeout,
-	}
-
-	heartbeatUrl := fmt.Sprintf("%s/api/v1/health/heartbeat", cfg.NyxTraceApiUrl)
-	bearerToken := fmt.Sprintf("Bearer %s", cfg.HealthCheckToken)
-
-	log.Printf("Starting heartbeat sender for proxy %s to %s every %s", cfg.ProxyId, heartbeatUrl, heartbeatInterval)
-
-	for {
-		<-ticker.C // Wait for the next tick
-
-		// Prepare request body
-		body := map[string]string{"proxyId": cfg.ProxyId}
-		jsonBody, err := json.Marshal(body)
-		if err != nil {
-			log.Printf("Heartbeat Error: Failed to marshal request body: %v", err)
-			continue // Skip this tick
-		}
-
-		// Create request
-		req, err := http.NewRequest("POST", heartbeatUrl, bytes.NewBuffer(jsonBody))
-		if err != nil {
-			log.Printf("Heartbeat Error: Failed to create request: %v", err)
-			continue // Skip this tick
-		}
-
-		// Set headers
-		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("Authorization", bearerToken)
-
-		// Send request
-		resp, err := client.Do(req)
-		if err != nil {
-			log.Printf("Heartbeat Error: Failed to send request to %s: %v", heartbeatUrl, err)
-			continue // Skip this tick
-		}
-
-		// Check response status
-		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-			if cfg.DebugLevel > 0 { // Log success only if debug enabled
-				log.Printf("Heartbeat sent successfully for proxy %s (Status: %d)", cfg.ProxyId, resp.StatusCode)
-			}
-		} else {
-			log.Printf("Heartbeat Error: Received non-success status code %d from %s", resp.StatusCode, heartbeatUrl)
-			// Optionally read response body for more details if needed
-			// bodyBytes, _ := io.ReadAll(resp.Body)
-			// log.Printf("Heartbeat Error Body: %s", string(bodyBytes))
-		}
-
-		resp.Body.Close() // Important to close the response body
 	}
 }

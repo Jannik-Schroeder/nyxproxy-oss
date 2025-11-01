@@ -17,7 +17,8 @@ import (
 
 	"encoding/base64"
 
-	"github.com/phanes/nyxtrace/nyxproxy-core/internal/config"
+	"github.com/jannik-schroeder/nyxproxy-oss/internal/config"
+	"github.com/jannik-schroeder/nyxproxy-oss/pkg/network"
 )
 
 // sensitiveHeaders contains all headers that should be removed for privacy
@@ -45,7 +46,7 @@ var sensitiveHeaders = []string{
 
 // debugLog prints debug messages based on debug level
 func (p *Proxy) debugLog(level int, format string, args ...interface{}) {
-	if p.config.DebugLevel >= level {
+	if p.config.GetDebugLevel() >= level {
 		fmt.Printf(format+"\n", args...)
 	}
 }
@@ -73,55 +74,14 @@ type Proxy struct {
 	localAddr  net.IP // Local address for outbound connections
 }
 
-// getOutboundIP returns the preferred outbound IP for the given protocol
-func getOutboundIP(protocol int) (net.IP, error) {
-	interfaces, err := net.Interfaces()
-	if err != nil {
-		return nil, fmt.Errorf("failed to list network interfaces: %v", err)
-	}
-
-	for _, iface := range interfaces {
-		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
-			continue // Skip down and loopback interfaces
-		}
-
-		addrs, err := iface.Addrs()
-		if err != nil {
-			continue
-		}
-
-		for _, addr := range addrs {
-			ipNet, ok := addr.(*net.IPNet)
-			if !ok {
-				continue
-			}
-
-			ip := ipNet.IP
-			isIPv6 := ip.To4() == nil
-
-			if protocol == 6 && isIPv6 {
-				// For IPv6, we want a global scope address (not link-local)
-				if !ip.IsLinkLocalUnicast() {
-					return ip, nil
-				}
-			} else if protocol == 4 && !isIPv6 {
-				// For IPv4, any non-private address will do
-				if !ip.IsPrivate() {
-					return ip, nil
-				}
-			}
-		}
-	}
-
-	return nil, fmt.Errorf("no suitable IPv%d address found", protocol)
-}
-
 // NewProxy creates a new HTTPS proxy server
 func NewProxy(cfg *config.ProxyConfig) (*Proxy, error) {
 	rand.Seed(time.Now().UnixNano())
 
+	protocol := cfg.GetProxyProtocol()
+
 	// Get local address for outbound connections
-	localAddr, err := getOutboundIP(cfg.ProxyProtocol)
+	localAddr, err := network.GetOutboundIP(cfg.Network.InterfaceName, protocol)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get outbound IP: %v", err)
 	}
@@ -135,7 +95,7 @@ func NewProxy(cfg *config.ProxyConfig) (*Proxy, error) {
 
 	// Configure HTTP server
 	proxy.httpServer = &http.Server{
-		Addr:    net.JoinHostPort(cfg.ListenAddress, strconv.Itoa(cfg.ListenPort)),
+		Addr:    net.JoinHostPort(cfg.GetListenAddress(), strconv.Itoa(cfg.GetListenPort())),
 		Handler: proxy,
 	}
 
@@ -144,16 +104,18 @@ func NewProxy(cfg *config.ProxyConfig) (*Proxy, error) {
 
 // resolveHost resolves a hostname to an IP address based on the configured protocol
 func (p *Proxy) resolveHost(ctx context.Context, host string) (string, error) {
+	protocol := p.config.GetProxyProtocol()
+
 	// If it's already an IP, only validate for outbound connections
 	if ip := net.ParseIP(host); ip != nil {
 		// Allow any IP version for the proxy itself
-		if host == p.config.ListenAddress {
+		if host == p.config.GetListenAddress() {
 			return host, nil
 		}
 		// For outbound connections, enforce IP version
 		isIPv6 := ip.To4() == nil
-		if (p.config.ProxyProtocol == 6) != isIPv6 {
-			return "", fmt.Errorf("outbound IP version mismatch: got %s but want IPv%d", host, p.config.ProxyProtocol)
+		if (protocol == 6) != isIPv6 {
+			return "", fmt.Errorf("outbound IP version mismatch: got %s but want IPv%d", host, protocol)
 		}
 		return host, nil
 	}
@@ -168,13 +130,13 @@ func (p *Proxy) resolveHost(ctx context.Context, host string) (string, error) {
 	var matchingIPs []net.IP
 	for _, addr := range addrs {
 		isIPv6 := addr.IP.To4() == nil
-		if (p.config.ProxyProtocol == 6) == isIPv6 {
+		if (protocol == 6) == isIPv6 {
 			matchingIPs = append(matchingIPs, addr.IP)
 		}
 	}
 
 	if len(matchingIPs) == 0 {
-		return "", fmt.Errorf("no IPv%d addresses found for %s", p.config.ProxyProtocol, host)
+		return "", fmt.Errorf("no IPv%d addresses found for %s", protocol, host)
 	}
 
 	return matchingIPs[0].String(), nil
@@ -202,7 +164,7 @@ func (p *Proxy) checkAuth(r *http.Request) bool {
 		return false
 	}
 
-	return credentials[0] == "proxy" && credentials[1] == p.config.Password
+	return credentials[0] == p.config.GetUsername() && credentials[1] == p.config.GetPassword()
 }
 
 // requireAuth sends a proxy authentication required response
@@ -448,6 +410,8 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 func (p *Proxy) handleConnect(w http.ResponseWriter, r *http.Request) {
 	p.debugLog(2, "Handling CONNECT request: %s", r.Host)
 
+	protocol := p.config.GetProxyProtocol()
+
 	host, port, err := net.SplitHostPort(r.Host)
 	if err != nil {
 		http.Error(w, "Invalid host", http.StatusBadGateway)
@@ -467,13 +431,13 @@ func (p *Proxy) handleConnect(w http.ResponseWriter, r *http.Request) {
 		Timeout:   30 * time.Second,
 		Control: func(network, address string, c syscall.RawConn) error {
 			return c.Control(func(fd uintptr) {
-				if p.config.ProxyProtocol == 6 {
+				if protocol == 6 {
 					syscall.SetsockoptInt(int(fd), syscall.IPPROTO_IPV6, syscall.IPV6_V6ONLY, 1)
 				}
 			})
 		},
 	}).Dial(func() string {
-		if p.config.ProxyProtocol == 6 {
+		if protocol == 6 {
 			return "tcp6"
 		}
 		return "tcp4"
@@ -512,8 +476,8 @@ func (p *Proxy) handleConnect(w http.ResponseWriter, r *http.Request) {
 
 // Start starts the HTTPS proxy server
 func (p *Proxy) Start() error {
-	addr := fmt.Sprintf("%s:%d", p.config.ListenAddress, p.config.ListenPort)
-	p.debugLog(1, "Starting https proxy on %s (Protocol: IPv%d)", addr, p.config.ProxyProtocol)
+	addr := fmt.Sprintf("%s:%d", p.config.GetListenAddress(), p.config.GetListenPort())
+	p.debugLog(1, "Starting https proxy on %s (Protocol: IPv%d)", addr, p.config.GetProxyProtocol())
 
 	return p.httpServer.ListenAndServe()
 }
@@ -538,11 +502,13 @@ func getRandomIPv6(baseIP net.IP) net.IP {
 
 // getNextLocalAddr returns the next IPv6 address to use
 func (p *Proxy) getNextLocalAddr() (net.IP, error) {
-	if p.config.ProxyProtocol != 6 {
-		return getOutboundIP(p.config.ProxyProtocol)
+	protocol := p.config.GetProxyProtocol()
+
+	if protocol != 6 {
+		return network.GetOutboundIP(p.config.Network.InterfaceName, protocol)
 	}
 
-	baseIP, err := getOutboundIP(6)
+	baseIP, err := network.GetOutboundIP(p.config.Network.InterfaceName, 6)
 	if err != nil {
 		return nil, err
 	}

@@ -1,9 +1,9 @@
-name: Release NyxProxy Core
+name: Release NyxProxy-OSS
 
 on:
   push:
     tags:
-      - 'v*'
+      - "v*"
 
 permissions:
   contents: write
@@ -17,7 +17,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v4
         with:
-          go-version-file: 'go.mod'
+          go-version-file: "go.mod"
 
       - name: Build for Linux
         env:
@@ -27,15 +27,22 @@ jobs:
         run: |
           # Create dist directory
           mkdir -p dist
-          
+
           # Build flags
-          BUILD_FLAGS="-X github.com/phanes/nyxtrace/nyxproxy-core/pkg/version.Version=${VERSION#v}"
-          BUILD_FLAGS="${BUILD_FLAGS} -X github.com/phanes/nyxtrace/nyxproxy-core/pkg/version.Commit=${COMMIT}"
-          BUILD_FLAGS="${BUILD_FLAGS} -X github.com/phanes/nyxtrace/nyxproxy-core/pkg/version.BuildTime=${BUILD_TIME}"
-          
-          # Build for Linux (both amd64 and arm64)
+          BUILD_FLAGS="-X github.com/jannik-schroeder/nyxproxy-oss/pkg/version.Version=${VERSION#v}"
+          BUILD_FLAGS="${BUILD_FLAGS} -X github.com/jannik-schroeder/nyxproxy-oss/pkg/version.Commit=${COMMIT}"
+          BUILD_FLAGS="${BUILD_FLAGS} -X github.com/jannik-schroeder/nyxproxy-oss/pkg/version.BuildTime=${BUILD_TIME}"
+
+          # Build proxy for Linux (both amd64 and arm64)
           GOOS=linux GOARCH=amd64 go build -ldflags "${BUILD_FLAGS}" -o dist/nyxproxy-linux-amd64 ./cmd/proxy
           GOOS=linux GOARCH=arm64 go build -ldflags "${BUILD_FLAGS}" -o dist/nyxproxy-linux-arm64 ./cmd/proxy
+
+          # Build setup tool for Linux (both amd64 and arm64)
+          GOOS=linux GOARCH=amd64 go build -ldflags "${BUILD_FLAGS}" -o dist/nyxproxy-setup-linux-amd64 ./cmd/setup
+          GOOS=linux GOARCH=arm64 go build -ldflags "${BUILD_FLAGS}" -o dist/nyxproxy-setup-linux-arm64 ./cmd/setup
+
+          # Copy example config
+          cp config.example.yaml dist/
 
       - name: Create Release
         uses: softprops/action-gh-release@v1
@@ -43,4 +50,7 @@ jobs:
           files: |
             dist/nyxproxy-linux-amd64
             dist/nyxproxy-linux-arm64
-          generate_release_notes: true 
+            dist/nyxproxy-setup-linux-amd64
+            dist/nyxproxy-setup-linux-arm64
+            dist/config.example.yaml
+          generate_release_notes: true
