@@ -369,7 +369,7 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 				Timeout:   30 * time.Second,
 			}
 
-			if p.config.ProxyProtocol == 6 {
+			if p.config.GetProxyProtocol() == 6 {
 				network = "tcp6"
 			} else {
 				network = "tcp4"
