@@ -13,6 +13,8 @@ import (
 	"github.com/jannik-schroeder/nyxproxy-oss/pkg/network"
 )
 
+var ipv6Manager *network.IPv6Manager
+
 // Proxy represents a SOCKS5 proxy server
 type Proxy struct {
 	config    *config.ProxyConfig
@@ -105,17 +107,13 @@ func getRandomIPv6(baseIP net.IP) net.IP {
 func (p *Proxy) getNextLocalAddr() (net.IP, error) {
 	protocol := p.config.GetProxyProtocol()
 
-	if protocol != 6 {
-		return network.GetOutboundIP(p.config.Network.InterfaceName, protocol)
+	// If IPv6 rotation is enabled and we have an IPv6 manager, use rotating IPs
+	if protocol == 6 && p.config.Network.RotateIPv6 && ipv6Manager != nil {
+		return ipv6Manager.GetRandomIPv6()
 	}
 
-	baseIP, err := network.GetOutboundIP(p.config.Network.InterfaceName, 6)
-	if err != nil {
-		return nil, err
-	}
-
-	baseIP = baseIP.Mask(net.CIDRMask(64, 128))
-	return getRandomIPv6(baseIP), nil
+	// Otherwise use the static interface IP
+	return network.GetOutboundIP(p.config.Network.InterfaceName, protocol)
 }
 
 // createResolver creates a protocol-specific DNS resolver
@@ -161,6 +159,17 @@ func NewProxy(cfg *config.ProxyConfig) (*Proxy, error) {
 	rand.Seed(time.Now().UnixNano())
 
 	protocol := cfg.GetProxyProtocol()
+
+	// Initialize IPv6 Manager if rotating IPv6 is enabled
+	if cfg.Network.RotateIPv6 && cfg.Network.IPv6Subnet != "" {
+		var err error
+		ipv6Manager, err = network.NewIPv6Manager(cfg.Network.InterfaceName, cfg.Network.IPv6Subnet)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create IPv6 manager: %v", err)
+		}
+		log.Printf("IPv6 rotation enabled for subnet: %s", cfg.Network.IPv6Subnet)
+	}
+
 	localAddr, err := network.GetOutboundIP(cfg.Network.InterfaceName, protocol)
 	if err != nil {
 		return nil, fmt.Errorf("failed to determine outbound IP: %v", err)

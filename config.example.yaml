@@ -26,6 +26,16 @@ network:
   # Enable IPv6 for outgoing connections
   ipv6_enabled: false
 
+  # IPv6 subnet for rotating IPs (e.g., "2a05:f480:1800:25db::/64")
+  # Only works on providers that support /64 routing (Vultr, OVH, Hetzner Dedicated, etc.)
+  # Leave empty to disable rotating IPs
+  ipv6_subnet: ""
+
+  # Enable rotating IPv6 addresses (requires ipv6_subnet and ipv6_enabled)
+  # Each connection will use a different random IPv6 from the subnet
+  # The IPs are automatically assigned to the interface before use
+  rotate_ipv6: false
+
 monitoring:
   # Enable monitoring endpoint
   enabled: true

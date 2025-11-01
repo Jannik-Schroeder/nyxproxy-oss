@@ -42,6 +42,10 @@ type NetworkSettings struct {
 	IPv4Enabled bool `yaml:"ipv4_enabled"`
 	// IPv6Enabled enables IPv6 for outgoing connections
 	IPv6Enabled bool `yaml:"ipv6_enabled"`
+	// IPv6Subnet is the IPv6 subnet for rotating IPs (e.g., "2a05:f480:1800:25db::/64")
+	IPv6Subnet string `yaml:"ipv6_subnet"`
+	// RotateIPv6 enables rotating IPv6 addresses from the subnet
+	RotateIPv6 bool `yaml:"rotate_ipv6"`
 }
 
 // MonitoringSettings contains monitoring endpoint configuration

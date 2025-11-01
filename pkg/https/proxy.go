@@ -20,6 +20,8 @@ import (
 	"github.com/jannik-schroeder/nyxproxy-oss/pkg/network"
 )
 
+var ipv6Manager *network.IPv6Manager
+
 // sensitiveHeaders contains all headers that should be removed for privacy
 var sensitiveHeaders = []string{
 	"X-Forwarded-For",
@@ -78,6 +80,16 @@ func NewProxy(cfg *config.ProxyConfig) (*Proxy, error) {
 	rand.Seed(time.Now().UnixNano())
 
 	protocol := cfg.GetProxyProtocol()
+
+	// Initialize IPv6 Manager if rotating IPv6 is enabled
+	if cfg.Network.RotateIPv6 && cfg.Network.IPv6Subnet != "" {
+		var err error
+		ipv6Manager, err = network.NewIPv6Manager(cfg.Network.InterfaceName, cfg.Network.IPv6Subnet)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create IPv6 manager: %v", err)
+		}
+		fmt.Printf("IPv6 rotation enabled for subnet: %s\n", cfg.Network.IPv6Subnet)
+	}
 
 	// Get local address for outbound connections
 	localAddr, err := network.GetOutboundIP(cfg.Network.InterfaceName, protocol)
@@ -489,17 +501,13 @@ func getRandomIPv6(baseIP net.IP) net.IP {
 func (p *Proxy) getNextLocalAddr() (net.IP, error) {
 	protocol := p.config.GetProxyProtocol()
 
-	if protocol != 6 {
-		return network.GetOutboundIP(p.config.Network.InterfaceName, protocol)
+	// If IPv6 rotation is enabled and we have an IPv6 manager, use rotating IPs
+	if protocol == 6 && p.config.Network.RotateIPv6 && ipv6Manager != nil {
+		return ipv6Manager.GetRandomIPv6()
 	}
 
-	baseIP, err := network.GetOutboundIP(p.config.Network.InterfaceName, 6)
-	if err != nil {
-		return nil, err
-	}
-
-	baseIP = baseIP.Mask(net.CIDRMask(64, 128))
-	return getRandomIPv6(baseIP), nil
+	// Otherwise use the static interface IP
+	return network.GetOutboundIP(p.config.Network.InterfaceName, protocol)
 }
 
 // isTextData checks if the data appears to be text
