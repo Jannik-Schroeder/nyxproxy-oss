@@ -56,13 +56,13 @@ func main() {
 		Start() error
 	}
 
-	switch cfg.ProxyType {
+	switch cfg.GetProxyType() {
 	case "socks5":
 		proxy, err = socks5.NewProxy(cfg)
 	case "https":
 		proxy, err = https.NewProxy(cfg)
 	default:
-		log.Fatalf("Unsupported proxy type: %s", cfg.ProxyType)
+		log.Fatalf("Unsupported proxy type: %s", cfg.GetProxyType())
 	}
 
 	if err != nil {
