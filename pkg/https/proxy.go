@@ -12,7 +12,6 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"encoding/base64"
@@ -368,13 +367,6 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 			dialer := &net.Dialer{
 				LocalAddr: &net.TCPAddr{IP: localIP},
 				Timeout:   30 * time.Second,
-				Control: func(network, address string, c syscall.RawConn) error {
-					return c.Control(func(fd uintptr) {
-						if p.config.ProxyProtocol == 6 {
-							syscall.SetsockoptInt(int(fd), syscall.IPPROTO_IPV6, syscall.IPV6_V6ONLY, 1)
-						}
-					})
-				},
 			}
 
 			if p.config.ProxyProtocol == 6 {
@@ -429,13 +421,6 @@ func (p *Proxy) handleConnect(w http.ResponseWriter, r *http.Request) {
 	targetConn, err := (&net.Dialer{
 		LocalAddr: &net.TCPAddr{IP: localIP},
 		Timeout:   30 * time.Second,
-		Control: func(network, address string, c syscall.RawConn) error {
-			return c.Control(func(fd uintptr) {
-				if protocol == 6 {
-					syscall.SetsockoptInt(int(fd), syscall.IPPROTO_IPV6, syscall.IPV6_V6ONLY, 1)
-				}
-			})
-		},
 	}).Dial(func() string {
 		if protocol == 6 {
 			return "tcp6"

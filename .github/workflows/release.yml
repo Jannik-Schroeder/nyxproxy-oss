@@ -19,6 +19,9 @@ jobs:
         with:
           go-version-file: "go.mod"
 
+      - name: Download dependencies
+        run: go mod download
+
       - name: Build for Linux
         env:
           VERSION: ${{ github.ref_name }}

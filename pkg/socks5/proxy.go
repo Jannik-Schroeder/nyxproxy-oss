@@ -6,7 +6,6 @@ import (
 	"log"
 	"math/rand"
 	"net"
-	"syscall"
 	"time"
 
 	"github.com/armon/go-socks5"
@@ -225,13 +224,6 @@ func NewProxy(cfg *config.ProxyConfig) (*Proxy, error) {
 			dialer := &net.Dialer{
 				LocalAddr: &net.TCPAddr{IP: localIP},
 				Timeout:   30 * time.Second,
-				Control: func(network, address string, c syscall.RawConn) error {
-					return c.Control(func(fd uintptr) {
-						if protocol == 6 {
-							syscall.SetsockoptInt(int(fd), syscall.IPPROTO_IPV6, syscall.IPV6_V6ONLY, 0)
-						}
-					})
-				},
 			}
 
 			// Always use the protocol specified in config
@@ -269,39 +261,4 @@ func (p *Proxy) Start() error {
 // Stop stops the SOCKS5 proxy server
 func (p *Proxy) Stop() error {
 	return nil
-}
-
-// setSocketOptions sets socket options for Linux
-func setSocketOptions(fd uintptr) error {
-	if err := syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_REUSEADDR, 1); err != nil {
-		return fmt.Errorf("failed to set SO_REUSEADDR: %v", err)
-	}
-	return nil
-}
-
-func (p *Proxy) handleConnection(conn net.Conn) {
-	// ... existing code ...
-
-	// Get the underlying file descriptor
-	tcpConn, ok := conn.(*net.TCPConn)
-	if !ok {
-		log.Printf("Connection is not TCP")
-		return
-	}
-
-	// Get raw connection
-	raw, err := tcpConn.SyscallConn()
-	if err != nil {
-		log.Printf("Failed to get raw connection: %v", err)
-		return
-	}
-
-	// Set socket options
-	raw.Control(func(fd uintptr) {
-		if err := setSocketOptions(fd); err != nil {
-			log.Printf("Failed to set socket options: %v", err)
-		}
-	})
-
-	// ... existing code ...
 }
