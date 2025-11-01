@@ -26,6 +26,8 @@ type Config struct {
 		InterfaceName string `yaml:"interface_name"`
 		IPv4Enabled   bool   `yaml:"ipv4_enabled"`
 		IPv6Enabled   bool   `yaml:"ipv6_enabled"`
+		IPv6Subnet    string `yaml:"ipv6_subnet"`
+		RotateIPv6    bool   `yaml:"rotate_ipv6"`
 	} `yaml:"network"`
 	Monitoring struct {
 		Enabled     bool `yaml:"enabled"`
@@ -121,6 +123,48 @@ func main() {
 		fmt.Println("   ✓ Both IPv4 and IPv6\n")
 	}
 
+	// 3a. IPv6 Rotation (if IPv6 is enabled)
+	if cfg.Network.IPv6Enabled {
+		fmt.Println("3a. IPv6 Rotation Setup")
+		fmt.Println("   Enable rotating IPv6 addresses from your /64 subnet?")
+		fmt.Println("   This provides a different IPv6 for each connection.")
+		fmt.Println("   ⚠️  Requires provider support (Vultr, OVH, Hetzner Dedicated, etc.)")
+		rotateChoice := readChoice(reader, "Enable IPv6 rotation?", []string{"y", "n"}, "n")
+		cfg.Network.RotateIPv6 = rotateChoice == "y"
+
+		if cfg.Network.RotateIPv6 {
+			// Try to auto-detect the IPv6 subnet
+			detectedSubnet, err := network.DetectIPv6Subnet(cfg.Network.InterfaceName)
+			if err == nil && detectedSubnet != "" {
+				fmt.Printf("   🔍 Auto-detected subnet: %s\n", detectedSubnet)
+				useDetected := readChoice(reader, "Use detected subnet?", []string{"y", "n"}, "y")
+				if useDetected == "y" {
+					cfg.Network.IPv6Subnet = detectedSubnet
+					fmt.Printf("   ✓ Using detected subnet: %s\n\n", cfg.Network.IPv6Subnet)
+				} else {
+					cfg.Network.IPv6Subnet = readString(reader, "Enter IPv6 subnet manually (e.g., 2a05:f480:1800:25db::/64)", "")
+					for cfg.Network.IPv6Subnet == "" {
+						fmt.Println("   ❌ IPv6 subnet is required for rotation")
+						cfg.Network.IPv6Subnet = readString(reader, "IPv6 subnet", "")
+					}
+					fmt.Printf("   ✓ IPv6 rotation enabled for %s\n\n", cfg.Network.IPv6Subnet)
+				}
+			} else {
+				fmt.Println("   ⚠️  Could not auto-detect subnet:", err)
+				fmt.Println("   Enter your IPv6 /64 subnet (e.g., 2a05:f480:1800:25db::/64)")
+				fmt.Println("   You can find this with: ip -6 addr show")
+				cfg.Network.IPv6Subnet = readString(reader, "IPv6 subnet", "")
+				for cfg.Network.IPv6Subnet == "" {
+					fmt.Println("   ❌ IPv6 subnet is required for rotation")
+					cfg.Network.IPv6Subnet = readString(reader, "IPv6 subnet", "")
+				}
+				fmt.Printf("   ✓ IPv6 rotation enabled for %s\n\n", cfg.Network.IPv6Subnet)
+			}
+		} else {
+			fmt.Println("   ✓ Using static IPv6 address\n")
+		}
+	}
+
 	// 4. Authentication
 	fmt.Println("4️⃣  Authentication Setup")
 	cfg.Proxy.Username = readString(reader, "Enter username", "admin")
@@ -200,9 +244,20 @@ func main() {
 	}
 	fmt.Printf("IPv4:            %v\n", cfg.Network.IPv4Enabled)
 	fmt.Printf("IPv6:            %v\n", cfg.Network.IPv6Enabled)
+	if cfg.Network.RotateIPv6 {
+		fmt.Printf("IPv6 Rotation:   Enabled (%s)\n", cfg.Network.IPv6Subnet)
+	}
 	fmt.Printf("Monitoring:      %v\n", cfg.Monitoring.Enabled)
 	fmt.Printf("Debug Level:     %d\n", cfg.Logging.DebugLevel)
 	fmt.Println()
+
+	if cfg.Network.RotateIPv6 {
+		fmt.Println("⚠️  Important: IPv6 Rotation Enabled")
+		fmt.Println("   Make sure your firewall allows port", cfg.Proxy.ListenPort)
+		fmt.Println("   Example for ufw: sudo ufw allow", cfg.Proxy.ListenPort)
+		fmt.Println()
+	}
+
 	fmt.Println("✓ Setup complete! You can now start the proxy with:")
 	fmt.Println("  ./nyxproxy")
 	fmt.Println()
