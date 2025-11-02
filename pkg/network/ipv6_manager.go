@@ -9,11 +9,13 @@ import (
 	"sync"
 )
 
-// IPv6Manager manages dynamic IPv6 address generation
+// IPv6Manager manages dynamic IPv6 address rotation with pre-populated IP pool
 type IPv6Manager struct {
 	mu            sync.Mutex
 	interfaceName string
 	subnet        *net.IPNet
+	ipPool        []net.IP  // Pre-populated pool of IPs
+	poolIndex     int       // Current position in the pool
 }
 
 // NewIPv6Manager creates a new IPv6 manager
@@ -51,32 +53,72 @@ func NewIPv6Manager(interfaceName string, subnet string) (*IPv6Manager, error) {
 	mgr := &IPv6Manager{
 		interfaceName: interfaceName,
 		subnet:        ipnet,
+		ipPool:        make([]net.IP, 0),
+		poolIndex:     0,
 	}
 
 	// Check if ndppd is running (warning only, not fatal)
 	WarnIfNdppdNotRunning()
 
-	fmt.Printf("✓ IPv6 rotation mode: Direct binding (no IP assignment needed)\n")
+	fmt.Printf("✓ IPv6 rotation mode: IP Pool (pre-populated)\n")
 	fmt.Printf("  Interface: %s\n", interfaceName)
-	fmt.Printf("  Subnet: %s\n\n", ipnet.String())
+	fmt.Printf("  Subnet: %s\n", ipnet.String())
+	fmt.Printf("  Initializing IP pool...\n")
+
+	// Pre-populate IP pool (default: 200 IPs)
+	poolSize := 200
+	if err := mgr.populateIPPool(poolSize); err != nil {
+		return nil, fmt.Errorf("failed to populate IP pool: %v", err)
+	}
+
+	fmt.Printf("✓ IP pool ready with %d addresses\n\n", poolSize)
 
 	return mgr, nil
 }
 
-// GetRandomIPv6 generates a random IPv6 address from the subnet
-// With ip_nonlocal_bind=1, we can bind to any IP in the routed subnet without adding it to the interface
-// This is much faster and more efficient than adding/removing IPs
+// GetRandomIPv6 returns a random IPv6 address from the pre-populated pool
+// This is fast because all IPs are already added to the interface
 func (m *IPv6Manager) GetRandomIPv6() (net.IP, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	// Generate random IPv6 in the subnet
-	ip := m.generateRandomIPv6()
+	if len(m.ipPool) == 0 {
+		return nil, fmt.Errorf("IP pool is empty")
+	}
 
-	// No need to add IP to interface - we use ip_nonlocal_bind
-	// ndppd will handle NDP responses for the entire /64 subnet
+	// Round-robin through the pool for even distribution
+	ip := m.ipPool[m.poolIndex]
+	m.poolIndex = (m.poolIndex + 1) % len(m.ipPool)
 
 	return ip, nil
+}
+
+// populateIPPool generates and adds a pool of IPs to the interface
+// This is done once at startup, so subsequent requests are fast
+func (m *IPv6Manager) populateIPPool(size int) error {
+	fmt.Printf("  Adding %d IPv6 addresses to interface (this may take 10-30 seconds)...\n", size)
+
+	for i := 0; i < size; i++ {
+		ip := m.generateRandomIPv6()
+
+		// Add IP to interface
+		if err := m.assignIPToInterface(ip); err != nil {
+			// Ignore "already exists" errors
+			errStr := err.Error()
+			if !strings.Contains(errStr, "File exists") && !strings.Contains(errStr, "RTNETLINK answers") {
+				return fmt.Errorf("failed to add IP %s: %v", ip.String(), err)
+			}
+		}
+
+		m.ipPool = append(m.ipPool, ip)
+
+		// Progress indicator every 50 IPs
+		if (i+1)%50 == 0 {
+			fmt.Printf("  Progress: %d/%d IPs added\n", i+1, size)
+		}
+	}
+
+	return nil
 }
 
 // generateRandomIPv6 generates a random IPv6 address within the subnet
@@ -129,7 +171,18 @@ func (m *IPv6Manager) removeIPFromInterface(ip string) error {
 	return nil
 }
 
-// Stop stops the IPv6 manager (no cleanup needed with direct binding)
+// Stop stops the IPv6 manager and cleans up the IP pool
 func (m *IPv6Manager) Stop() {
-	// Nothing to clean up - we don't add IPs to the interface
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	fmt.Printf("Cleaning up IP pool (%d addresses)...\n", len(m.ipPool))
+
+	// Remove all IPs from the interface
+	for _, ip := range m.ipPool {
+		m.removeIPFromInterface(ip.String())
+	}
+
+	m.ipPool = nil
+	fmt.Printf("✓ IP pool cleaned up\n")
 }
