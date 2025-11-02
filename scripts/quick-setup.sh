@@ -165,8 +165,8 @@ echo -n "  Max age in minutes before rotation [30]: "
 read MAX_AGE
 MAX_AGE=${MAX_AGE:-30}
 
-# Create config.yaml
-cat > ../config.yaml <<EOF
+# Create config.yaml in current directory
+cat > config.yaml <<EOF
 # NyxProxy Configuration
 # Auto-generated on $(date)
 
