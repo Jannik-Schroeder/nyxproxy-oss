@@ -38,7 +38,9 @@ func NewIPv6Manager(interfaceName string, subnet string) (*IPv6Manager, error) {
 	return mgr, nil
 }
 
-// GetRandomIPv6 generates a random IPv6 address from the subnet and assigns it to the interface
+// GetRandomIPv6 generates a random IPv6 address from the subnet
+// For /64 subnets, most hosting providers route the entire subnet to your server,
+// so you can bind to any IP in the range without explicitly adding it to the interface
 func (m *IPv6Manager) GetRandomIPv6() (net.IP, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -46,12 +48,7 @@ func (m *IPv6Manager) GetRandomIPv6() (net.IP, error) {
 	// Generate random IPv6 in the subnet
 	ip := m.generateRandomIPv6()
 
-	// Add IP to interface
-	if err := m.assignIPToInterface(ip); err != nil {
-		return nil, fmt.Errorf("failed to assign IP: %v", err)
-	}
-
-	// Track the IP
+	// Track the IP (for monitoring/cleanup if needed)
 	m.assignedIPs[ip.String()] = time.Now()
 
 	return ip, nil
@@ -102,17 +99,16 @@ func (m *IPv6Manager) removeIPFromInterface(ip string) error {
 	return nil
 }
 
-// cleanupLoop periodically removes old IPs (older than 10 minutes)
+// cleanupLoop periodically cleans up old IP entries from tracking (older than 10 minutes)
+// Since we don't add IPs to the interface, we just remove them from our tracking map
 func (m *IPv6Manager) cleanupLoop() {
 	for range m.cleanupTicker.C {
 		m.mu.Lock()
 		now := time.Now()
 		for ip, assignedTime := range m.assignedIPs {
 			if now.Sub(assignedTime) > 10*time.Minute {
-				// Remove old IP
-				if err := m.removeIPFromInterface(ip); err == nil {
-					delete(m.assignedIPs, ip)
-				}
+				// Remove from tracking map
+				delete(m.assignedIPs, ip)
 			}
 		}
 		m.mu.Unlock()
@@ -125,10 +121,8 @@ func (m *IPv6Manager) Stop() {
 		m.cleanupTicker.Stop()
 	}
 
-	// Clean up all assigned IPs
+	// Clear tracking map
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	for ip := range m.assignedIPs {
-		m.removeIPFromInterface(ip)
-	}
+	m.assignedIPs = make(map[string]time.Time)
 }

@@ -357,6 +357,7 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 
 	localIP, err := p.getNextLocalAddr()
 	if err != nil {
+		p.debugLog(1, "Failed to get local IP: %v", err)
 		http.Error(w, "Failed to get local IP", http.StatusInternalServerError)
 		return
 	}
@@ -424,23 +425,25 @@ func (p *Proxy) handleConnect(w http.ResponseWriter, r *http.Request) {
 
 	localIP, err := p.getNextLocalAddr()
 	if err != nil {
+		p.debugLog(1, "Failed to get local IP: %v", err)
 		http.Error(w, "Failed to get local IP", http.StatusInternalServerError)
 		return
 	}
 
 	p.debugLog(2, "Using local IP: %s", localIP)
 
+	network := "tcp4"
+	if protocol == 6 {
+		network = "tcp6"
+	}
+
 	targetConn, err := (&net.Dialer{
 		LocalAddr: &net.TCPAddr{IP: localIP},
 		Timeout:   30 * time.Second,
-	}).Dial(func() string {
-		if protocol == 6 {
-			return "tcp6"
-		}
-		return "tcp4"
-	}(), net.JoinHostPort(host, port))
+	}).Dial(network, net.JoinHostPort(host, port))
 
 	if err != nil {
+		p.debugLog(1, "Failed to connect to %s using %s from %s: %v", r.Host, network, localIP, err)
 		http.Error(w, "Failed to connect", http.StatusBadGateway)
 		return
 	}
