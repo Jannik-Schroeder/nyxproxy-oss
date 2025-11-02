@@ -1,0 +1,32 @@
+[Unit]
+Description=NyxProxy IPv6 Rotating Proxy Server
+Documentation=https://github.com/Jannik-Schroeder/nyxproxy-oss
+After=network-online.target ndppd.service
+Wants=network-online.target
+Requires=ndppd.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root
+ExecStart=/root/nyxproxy
+Restart=on-failure
+RestartSec=10
+StartLimitInterval=5min
+StartLimitBurst=3
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=nyxproxy
+
+# Security hardening (optional)
+NoNewPrivileges=true
+PrivateTmp=true
+
+# Resource limits (optional - uncomment if needed)
+# LimitNOFILE=65536
+# LimitNPROC=4096
+
+[Install]
+WantedBy=multi-user.target

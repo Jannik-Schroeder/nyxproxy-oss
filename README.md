@@ -2,485 +2,655 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Go Version](https://img.shields.io/badge/Go-1.21+-00ADD8?logo=go)](https://go.dev/)
+[![Latest Release](https://img.shields.io/github/v/release/jannik-schroeder/nyxproxy-oss)](https://github.com/jannik-schroeder/nyxproxy-oss/releases)
 
-A flexible, high-performance proxy server supporting both SOCKS5 and HTTPS protocols with advanced network interface control and built-in monitoring.
+**High-Performance Proxy Server with Automatic IPv6 Rotation** - Get a new IPv6 address for every request from your own /64 subnet!
 
-## ✨ Features
+---
 
-- **Multiple Proxy Protocols**: Choose between SOCKS5 or HTTPS proxy
-- **Dual Stack Support**: Full IPv4 and IPv6 support with per-interface configuration
-- **IPv6 Rotation**: Dynamic IPv6 address rotation from /64 subnets for enhanced privacy
-- **Network Interface Selection**: Bind to specific network interfaces or auto-detect
-- **Authentication**: Username/password authentication for both proxy types
-- **Monitoring**: Built-in HTTP monitoring endpoints for health checks and statistics
-- **Easy Setup**: Interactive setup wizard for first-time configuration
-- **YAML Configuration**: Simple, readable configuration files
-- **Cross-Platform**: Runs on Linux (amd64 and arm64)
+## 📋 Table of Contents
+
+- [Why NyxProxy?](#-why-nyxproxy)
+- [Key Features](#-key-features)
+- [How IPv6 Rotation Works](#-how-ipv6-rotation-works)
+- [Quick Start](#-quick-start)
+  - [One-Command Setup (Debian/Ubuntu)](#one-command-setup-debianubuntu)
+  - [Manual Setup](#manual-setup)
+- [Configuration](#-configuration)
+- [Running as Daemon (Systemd)](#-running-as-daemon-systemd)
+- [Usage Examples](#-usage-examples)
+- [IPv6 Rotation Explained](#-ipv6-rotation-explained)
+- [Requirements](#-requirements)
+- [Troubleshooting](#-troubleshooting)
+- [License](#-license)
+
+---
+
+## 🎯 Why NyxProxy?
+
+NyxProxy is a **proxy server that gives you a different IPv6 address for every request** - automatically!
+
+### The Problem
+Most proxies use a single IP address, which makes you:
+- ❌ Easy to track across requests
+- ❌ Vulnerable to rate limiting
+- ❌ Identifiable by fingerprinting
+- ❌ Blocked after too many requests
+
+### The Solution: IPv6 Rotation
+NyxProxy uses your provider's **IPv6 /64 subnet** (that's 18 quintillion IPs!) to rotate automatically:
+- ✅ **Different IP for each request** - appears as different users
+- ✅ **No rate limiting** - each IP is "fresh" and unused
+- ✅ **Anti-fingerprinting** - impossible to track across requests
+- ✅ **Intelligent rotation** - IPs are replaced after 100 uses or 30 minutes
+- ✅ **Fast** - pre-populated pool of 200 IPs ready to use
+
+### Real-World Use Cases
+- **Web Scraping**: Avoid rate limits by appearing as different users
+- **API Testing**: Test with multiple "users" from different IPs
+- **Privacy**: Each request appears to come from a different source
+- **Load Distribution**: Spread load across multiple IPs
+
+---
+
+## ✨ Key Features
+
+### 🔄 Automatic IPv6 Rotation (Main Feature!)
+- **200+ IPv6 addresses** in rotation pool
+- **Intelligent rotation**: Replace IPs after 100 uses OR 30 minutes
+- **Fully configurable**: Adjust pool size, rotation frequency, and age
+- **Background refresh**: Old IPs are automatically replaced
+- **No manual intervention**: Set it and forget it
+
+### 🚀 Performance
+- **< 100ms per request** - pre-populated IP pool
+- **Concurrent connections** - handle thousands of connections
+- **Efficient rotation** - no delays or blocking
+
+### 🔧 Flexible Configuration
+- **SOCKS5 or HTTPS proxy** - choose your protocol
+- **IPv4 + IPv6 support** - dual stack capable
+- **Interface selection** - auto-detect or manual
+- **Authentication** - username/password protection
+- **Monitoring endpoint** - built-in health checks
+
+### 🐧 Linux Native
+- **Debian/Ubuntu** - one-command setup
+- **Systemd service** - run as daemon
+- **Auto-start on boot** - reliable deployment
+- **ARM64 support** - Raspberry Pi compatible
+
+---
+
+## 🔍 How IPv6 Rotation Works
+
+### Understanding IPv6 /64 Subnets
+
+When you rent a server from providers like **Vultr, OVH, Hetzner**, you get:
+- 1 primary IPv6 address (e.g., `2a05:f480:1800:25db::1`)
+- 1 entire **/64 subnet** (e.g., `2a05:f480:1800:25db::/64`)
+
+**What does /64 mean?**
+- The first 64 bits are your subnet prefix
+- The last 64 bits can be **any value you want**
+- That's `2^64 = 18,446,744,073,709,551,616` possible IPv6 addresses!
+
+### NyxProxy's Smart Rotation
+
+```
+Your /64 Subnet: 2a05:f480:1800:25db::/64
+                  └─────────┬──────────┘└─can be anything─┘
+                      Your prefix (fixed)   Your IPs (18 quintillion!)
+
+NyxProxy generates random IPs:
+├─ 2a05:f480:1800:25db:1a2b:3c4d:5e6f:7890  ← Request 1
+├─ 2a05:f480:1800:25db:9988:7766:5544:3322  ← Request 2
+├─ 2a05:f480:1800:25db:aaaa:bbbb:cccc:dddd  ← Request 3
+└─ ... (200 IPs in pool, automatically rotated)
+```
+
+### The 3-Stage Process
+
+**Stage 1: Startup (20-30 seconds)**
+```
+1. Generate 200 random IPs from your /64 subnet
+2. Add each IP to your network interface
+3. Ready! All IPs can be used immediately
+```
+
+**Stage 2: Request Handling (< 100ms)**
+```
+1. New proxy request comes in
+2. Pick next IP from pool (round-robin)
+3. Bind outgoing connection to this IP
+4. Track usage (count++, lastUsed = now)
+```
+
+**Stage 3: Background Rotation (every 5 minutes)**
+```
+Check each IP:
+  - Used 100+ times? → Replace with fresh IP
+  - Older than 30min? → Replace with fresh IP
+  - Otherwise: Keep it
+```
+
+---
 
 ## 🚀 Quick Start
 
-### 1. Download
+### One-Command Setup (Debian/Ubuntu)
 
-Download the latest release from the [Releases](https://github.com/jannik-schroeder/nyxproxy-oss/releases) page:
-
-```bash
-# For amd64
-wget https://github.com/jannik-schroeder/nyxproxy-oss/releases/latest/download/nyxproxy-linux-amd64
-wget https://github.com/jannik-schroeder/nyxproxy-oss/releases/latest/download/nyxproxy-setup-linux-amd64
-
-# For arm64
-wget https://github.com/jannik-schroeder/nyxproxy-oss/releases/latest/download/nyxproxy-linux-arm64
-wget https://github.com/jannik-schroeder/nyxproxy-oss/releases/latest/download/nyxproxy-setup-linux-arm64
-
-# Make executable
-chmod +x nyxproxy-linux-* nyxproxy-setup-linux-*
-
-# Rename for convenience
-mv nyxproxy-linux-amd64 nyxproxy
-mv nyxproxy-setup-linux-amd64 nyxproxy-setup
-```
-
-### 2. Run Setup Wizard
-
-The setup wizard will guide you through the configuration:
+The easiest way to get started:
 
 ```bash
-./nyxproxy-setup
-```
+# 1. Download and run setup script
+wget https://raw.githubusercontent.com/Jannik-Schroeder/nyxproxy-oss/main/scripts/quick-setup.sh
+chmod +x quick-setup.sh
+sudo ./quick-setup.sh
 
-This will create a `config.yaml` file with your settings.
+# 2. Follow the prompts:
+#    - Enter proxy password
+#    - Configure IP pool size [200]
+#    - Configure max uses per IP [100]
+#    - Configure IP age limit [30 minutes]
 
-### 3. Start the Proxy
-
-```bash
+# 3. Download and start NyxProxy
+wget https://github.com/Jannik-Schroeder/nyxproxy-oss/releases/latest/download/nyxproxy-linux-amd64 -O nyxproxy
+chmod +x nyxproxy
 ./nyxproxy
 ```
 
-That's it! Your proxy is now running.
+**What the setup script does:**
+- ✅ Auto-detects your network interface
+- ✅ Auto-detects your IPv6 /64 subnet
+- ✅ Installs and configures ndppd (NDP proxy)
+- ✅ Sets kernel parameters for IPv6 routing
+- ✅ Creates optimized config.yaml
 
-## 📖 Configuration
+**Expected output:**
+```
+✓ IPv6 rotation mode: IP Pool with dynamic rotation
+  Interface: enp1s0
+  Subnet: 2a05:f480:1800:25db::/64
+  Pool size: 200 IPs
+  Rotation: Every 100 uses or 30m0s
+  Initializing IP pool...
+  Progress: 50/200 IPs added
+  Progress: 100/200 IPs added
+  Progress: 150/200 IPs added
+  Progress: 200/200 IPs added
+✓ IP pool ready with 200 addresses
+✓ Background IP rotation started
 
-### Interactive Setup
+Starting https proxy on 0.0.0.0:8080 (Protocol: IPv6)
+```
 
-The easiest way to configure NyxProxy-OSS is using the interactive setup wizard:
+---
+
+### Manual Setup
+
+<details>
+<summary>Click to expand manual setup instructions</summary>
+
+#### 1. Download NyxProxy
 
 ```bash
-./nyxproxy-setup
+wget https://github.com/jannik-schroeder/nyxproxy-oss/releases/latest/download/nyxproxy-linux-amd64 -O nyxproxy
+chmod +x nyxproxy
 ```
 
-The wizard will guide you through:
-1. Proxy type selection (SOCKS5 or HTTPS)
-2. Network interface selection
-3. IP protocol configuration (IPv4, IPv6, or both)
-4. Authentication credentials
-5. Listen address and port
-6. Monitoring setup
-7. Logging level
-
-### Manual Configuration
-
-Alternatively, create a `config.yaml` file manually:
-
-```yaml
-proxy:
-  type: socks5                    # or "https"
-  listen_address: 0.0.0.0
-  listen_port: 1080
-  username: admin
-  password: your_secure_password
-
-network:
-  interface_name: ""              # empty = auto-detect, or specify like "eth0"
-  ipv4_enabled: true
-  ipv6_enabled: false
-  rotate_ipv6: false              # Enable IPv6 rotation (requires setup, see below)
-  ipv6_subnet: ""                 # IPv6 /64 subnet for rotation, e.g. "2a05:f480:1800:25db::/64"
-
-monitoring:
-  enabled: true
-  port: 9090
-  allow_remote: false             # true = accessible from other hosts
-
-logging:
-  debug_level: 1                  # 0=none, 1=basic, 2=detailed
-```
-
-### Environment Variables (Legacy)
-
-For backward compatibility, you can also use environment variables:
+#### 2. Configure IPv6 Rotation
 
 ```bash
-export PROXY_TYPE=socks5
-export PROXY_LISTEN_ADDRESS=0.0.0.0
-export PROXY_LISTEN_PORT=1080
-export PROXY_USERNAME=admin
-export PROXY_PASSWORD=your_password
-export PROXY_PROTOCOL=4           # 4=IPv4, 6=IPv6
-export MONITORING_ENABLED=true
-export DEBUG_LEVEL=1
+# Install ndppd
+sudo apt update && sudo apt install -y ndppd
 
-./nyxproxy
-```
-
-## 🔍 Monitoring
-
-When monitoring is enabled, NyxProxy-OSS provides HTTP endpoints for health checks and statistics.
-
-### Health Check
-
-```bash
-curl http://localhost:9090/health
-```
-
-Response:
-```json
-{
-  "status": "ok",
-  "uptime": "2h15m30s",
-  "version": "1.0.0"
-}
-```
-
-### Statistics
-
-```bash
-curl http://localhost:9090/stats
-```
-
-Response:
-```json
-{
-  "uptime": "2h15m30s",
-  "active_connections": 42,
-  "total_connections": 1337,
-  "bytes_sent": 1048576,
-  "bytes_received": 2097152,
-  "interface": "eth0"
-}
-```
-
-### Configuration
-
-```bash
-curl http://localhost:9090/config
-```
-
-Returns the current configuration (excluding sensitive data like passwords).
-
-## 🌐 Network Interface Selection
-
-NyxProxy-OSS allows you to select which network interface to use for outgoing connections.
-
-### Auto-detect (Default)
-
-Leave `interface_name` empty in the config to automatically detect the best interface:
-
-```yaml
-network:
-  interface_name: ""
-```
-
-### Specific Interface
-
-Specify an interface name to bind to that interface:
-
-```yaml
-network:
-  interface_name: "eth0"
-```
-
-To list available interfaces, use the setup wizard or check with:
-
-```bash
-ip addr show
-```
-
-## 🔄 IPv6 Rotation
-
-NyxProxy-OSS supports dynamic IPv6 address rotation, allowing each outgoing connection to use a different IPv6 address from your /64 subnet. This significantly enhances privacy and makes it harder to track your connections.
-
-### Prerequisites
-
-- A server with an IPv6 /64 subnet allocation (common with hosting providers like Vultr, Hetzner, etc.)
-- Root access to configure system networking
-- Linux operating system
-
-### Setup
-
-**Option 1: Automated Setup (Recommended)**
-
-Use our setup script to automatically configure your system:
-
-```bash
-# Download the setup script
-wget https://raw.githubusercontent.com/jannik-schroeder/nyxproxy-oss/main/scripts/setup-ipv6-rotation.sh
-
-# Make it executable
-chmod +x setup-ipv6-rotation.sh
-
-# Run as root
-sudo ./setup-ipv6-rotation.sh
-```
-
-The script will:
-- Detect your network interface and IPv6 subnet
-- Configure kernel parameters for IPv6 non-local binding
-- Install and configure ndppd (NDP Proxy Daemon)
-- Enable the service to start automatically
-
-**Option 2: Manual Setup**
-
-If you prefer to configure manually:
-
-```bash
-# 1. Enable IPv6 non-local binding
-sudo sysctl -w net.ipv6.ip_nonlocal_bind=1
-echo "net.ipv6.ip_nonlocal_bind=1" | sudo tee -a /etc/sysctl.conf
-
-# 2. Install ndppd (Debian/Ubuntu)
-sudo apt-get update
-sudo apt-get install -y ndppd
-
-# For CentOS/RHEL:
-# sudo yum install -y ndppd
-
-# 3. Configure ndppd
-sudo tee /etc/ndppd.conf > /dev/null <<EOF
+# Create ndppd config
+sudo tee /etc/ndppd.conf <<EOF
 route-ttl 30000
 
-proxy eth0 {
+proxy enp1s0 {
     router no
     timeout 500
     ttl 30000
 
-    rule 2001:db8::/64 {
+    rule 2a05:f480:1800:25db::/64 {
         auto
     }
 }
 EOF
 
-# Replace 'eth0' with your interface name
-# Replace '2001:db8::/64' with your actual IPv6 subnet
+# Set kernel parameters
+sudo sysctl -w net.ipv6.conf.all.proxy_ndp=1
+sudo sysctl -w net.ipv6.conf.enp1s0.proxy_ndp=1
+sudo sysctl -w net.ipv6.ip_nonlocal_bind=1
 
-# 4. Enable and start ndppd
+# Start ndppd
 sudo systemctl enable ndppd
-sudo systemctl restart ndppd
+sudo systemctl start ndppd
 ```
 
-### Configuration
+#### 3. Create config.yaml
 
-After running the setup, configure NyxProxy to use IPv6 rotation:
+```yaml
+proxy:
+  type: https
+  listen_address: "0.0.0.0"
+  listen_port: 8080
+  username: "admin"
+  password: "your-secure-password"
+
+network:
+  interface_name: "enp1s0"                        # Your interface
+  ipv4_enabled: false
+  ipv6_enabled: true
+  rotate_ipv6: true
+  ipv6_subnet: "2a05:f480:1800:25db::/64"        # Your /64 subnet
+
+  # Rotation settings
+  ipv6_pool_size: 200     # Number of IPs in pool
+  ipv6_max_usage: 100     # Replace after 100 uses
+  ipv6_max_age: 30        # Replace after 30 minutes
+
+monitoring:
+  enabled: true
+  port: 9090
+  allow_remote: false
+
+logging:
+  debug_level: 0
+```
+
+#### 4. Start NyxProxy
+
+```bash
+./nyxproxy
+```
+
+</details>
+
+---
+
+## ⚙️ Configuration
+
+### Basic Configuration
+
+```yaml
+proxy:
+  type: https              # or "socks5"
+  listen_address: "0.0.0.0"
+  listen_port: 8080
+  username: "admin"
+  password: "secure-password"
+```
+
+### IPv6 Rotation Settings
 
 ```yaml
 network:
-  interface_name: "eth0"          # Your network interface
-  ipv4_enabled: false
-  ipv6_enabled: true
-  rotate_ipv6: true               # Enable rotation
-  ipv6_subnet: "2001:db8::/64"    # Your /64 subnet
+  rotate_ipv6: true
+  ipv6_subnet: "2a05:f480:1800:25db::/64"
+
+  # Pool configuration
+  ipv6_pool_size: 200     # Number of IPs (default: 200)
+  ipv6_max_usage: 100     # Max uses per IP (default: 100)
+  ipv6_max_age: 30        # Max age in minutes (default: 30)
 ```
 
-### Verification
+### Rotation Strategies
 
-Check that ndppd is running:
+#### Aggressive (Anti-Fingerprinting)
+```yaml
+ipv6_pool_size: 500      # Lots of IPs
+ipv6_max_usage: 25       # Replace quickly
+ipv6_max_age: 10         # Short lifetime
+```
+→ Maximum privacy, IPs change frequently
+
+#### Moderate (Recommended)
+```yaml
+ipv6_pool_size: 200      # Good balance
+ipv6_max_usage: 100      # Standard
+ipv6_max_age: 30         # 30 minutes
+```
+→ Best balance between performance and privacy
+
+#### Conservative (Performance)
+```yaml
+ipv6_pool_size: 100      # Fewer IPs, faster startup
+ipv6_max_usage: 500      # Use IPs longer
+ipv6_max_age: 120        # 2 hours
+```
+→ Less overhead, better performance
+
+---
+
+## 🔧 Running as Daemon (Systemd)
+
+### Create Systemd Service
 
 ```bash
-sudo systemctl status ndppd
+sudo tee /etc/systemd/system/nyxproxy.service <<EOF
+[Unit]
+Description=NyxProxy IPv6 Rotating Proxy Server
+After=network.target ndppd.service
+Requires=ndppd.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root
+ExecStart=/root/nyxproxy
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+# Security hardening (optional)
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
+EOF
 ```
 
-Start NyxProxy and test the rotation:
+### Manage Service
 
 ```bash
-# Start the proxy
-./nyxproxy
+# Enable auto-start on boot
+sudo systemctl enable nyxproxy
 
-# Test from another machine
+# Start service
+sudo systemctl start nyxproxy
+
+# Check status
+sudo systemctl status nyxproxy
+
+# View logs
+sudo journalctl -u nyxproxy -f
+
+# Restart service
+sudo systemctl restart nyxproxy
+
+# Stop service
+sudo systemctl stop nyxproxy
+```
+
+---
+
+## 💻 Usage Examples
+
+### cURL
+
+```bash
+# Single request
 curl --proxy http://admin:password@your-server:8080 https://api6.ipify.org
 
-# Run multiple times to see different IPv6 addresses
-for i in {1..5}; do
+# 10 requests - each with different IPv6
+for i in {1..10}; do
+  echo "Request $i:"
   curl --proxy http://admin:password@your-server:8080 https://api6.ipify.org
 done
 ```
 
-Each request should show a different IPv6 address from your subnet.
+### Python
 
-### Troubleshooting IPv6 Rotation
+```python
+import requests
 
-**"bind: cannot assign requested address"**
+proxies = {
+    'http': 'http://admin:password@your-server:8080',
+    'https': 'http://admin:password@your-server:8080'
+}
 
-This means the system isn't configured to allow binding to arbitrary IPs in the subnet:
-- Make sure `net.ipv6.ip_nonlocal_bind=1` is set: `sysctl net.ipv6.ip_nonlocal_bind`
-- Ensure ndppd is running: `systemctl status ndppd`
-- Check ndppd logs: `journalctl -u ndppd -n 50`
-
-**ndppd not responding to NDP requests**
-
-Check your firewall allows ICMPv6:
-```bash
-# Allow ICMPv6 (iptables)
-sudo ip6tables -A INPUT -p ipv6-icmp -j ACCEPT
-sudo ip6tables -A OUTPUT -p ipv6-icmp -j ACCEPT
+# Each request uses a different IPv6
+for i in range(10):
+    response = requests.get('https://api6.ipify.org', proxies=proxies)
+    print(f"Request {i+1}: {response.text}")
 ```
 
-**Want to disable rotation**
+### Node.js
 
-Simply set `rotate_ipv6: false` in your config and restart NyxProxy.
+```javascript
+const axios = require('axios');
 
-## 🔐 Authentication
+const proxy = {
+  host: 'your-server',
+  port: 8080,
+  auth: {
+    username: 'admin',
+    password: 'password'
+  }
+};
 
-Both SOCKS5 and HTTPS proxies require authentication.
-
-### SOCKS5 Client Configuration
-
-```bash
-# Command line tools
-curl --proxy socks5://admin:password@localhost:1080 https://example.com
-
-# Firefox
-# Settings → Network Settings → Manual proxy configuration
-# SOCKS Host: localhost, Port: 1080
-# Username: admin, Password: password
+// Each request uses a different IPv6
+for (let i = 0; i < 10; i++) {
+  axios.get('https://api6.ipify.org', { proxy })
+    .then(res => console.log(`Request ${i+1}: ${res.data}`));
+}
 ```
 
-### HTTPS Client Configuration
+---
 
-```bash
-# Command line tools
-curl --proxy http://admin:password@localhost:8080 https://example.com
+## 📚 IPv6 Rotation Explained
 
-# Browser
-# Set HTTP proxy to localhost:8080
-# Username: admin, Password: password
+### Why 200 IPs in the Pool?
+
+**Startup Time vs. Diversity Trade-off:**
+- More IPs = Longer startup (but only once!)
+- More IPs = More diversity, less repetition
+- 200 IPs is the sweet spot for most use cases
+
+**Calculation:**
+```
+200 IPs × 100 uses = 20,000 requests before first rotation
+20,000 requests ÷ 100 req/min = 200 minutes of unique IPs
 ```
 
-## 📊 Use Cases
+### Why Replace After 100 Uses?
 
-- **Privacy**: Route traffic through specific network interfaces
-- **IPv6 Testing**: Test applications with IPv6-only connections
-- **Development**: Local proxy for testing applications
-- **Monitoring**: Track connection statistics and bandwidth usage
-- **Multi-homed Systems**: Control which network interface handles proxy traffic
+**Rate Limiting Protection:**
+- Most APIs rate-limit per IP
+- 100 requests is typically below most thresholds
+- After 100 uses, IP is "burned" → replace it
 
-## 🛠️ Building from Source
+### Why Replace After 30 Minutes?
 
-### Prerequisites
+**Time-Based Tracking:**
+- Some services track IPs over time
+- Fresh IPs are less likely to be flagged
+- 30 minutes is a good balance
 
-- Go 1.21 or later
-- Linux (Windows and macOS support coming soon)
+### Background Rotation
 
-### Build
-
-```bash
-# Clone the repository
-git clone https://github.com/jannik-schroeder/nyxproxy-oss.git
-cd nyxproxy-oss
-
-# Build the proxy
-go build -o nyxproxy ./cmd/proxy
-
-# Build the setup tool
-go build -o nyxproxy-setup ./cmd/setup
-
-# Run
-./nyxproxy-setup
-./nyxproxy
+Every 5 minutes, NyxProxy checks all IPs:
+```
+For each IP in pool:
+  If (usageCount >= 100) OR (age > 30 minutes):
+    1. Remove old IP from interface
+    2. Generate new random IP
+    3. Add new IP to interface
+    4. Update pool
 ```
 
-## 📝 Command Line Options
-
-### Proxy Server
-
-```bash
-./nyxproxy --version    # Show version information
-./nyxproxy              # Start with config.yaml or environment variables
+**Example log:**
+```
+14:35:00 - ✓ Rotated 12 IPs (used 100+ times)
+15:05:00 - ✓ Rotated 8 IPs (age 30m+)
+15:35:00 - ✓ Rotated 5 IPs (used 100+ times)
 ```
 
-### Setup Tool
+---
+
+## 📋 Requirements
+
+### Server Requirements
+- **OS**: Linux (Debian, Ubuntu, CentOS, etc.)
+- **Architecture**: amd64 or arm64
+- **RAM**: >= 512 MB
+- **Disk**: >= 100 MB
+
+### Network Requirements
+- **IPv6 /64 subnet** routed to your server
+- **Supported providers**:
+  - ✅ Vultr (recommended)
+  - ✅ OVH
+  - ✅ Hetzner Dedicated Servers
+  - ✅ Online.net
+  - ❌ DigitalOcean (only /124, too small)
+  - ❌ AWS (IPv6 requires extra config)
+
+### Check Your Setup
 
 ```bash
-./nyxproxy-setup        # Run interactive setup wizard
+# Check if you have a /64 subnet
+ip -6 addr show | grep "scope global"
+
+# Should show something like:
+# inet6 2a05:f480:1800:25db::1/64 scope global
+
+# Test IPv6 connectivity
+ping6 google.com
+
+# Check if ndppd is installed
+which ndppd
 ```
+
+---
 
 ## 🔧 Troubleshooting
 
-### Port Already in Use
+### Problem: "Cannot find device ''"
 
-If the proxy fails to start with "address already in use":
+**Cause:** Network interface not configured
 
+**Solution:**
 ```bash
-# Check what's using the port
-sudo lsof -i :1080
+# Find your interface
+ip link show
 
-# Change the port in config.yaml
-# OR kill the other process
+# Set in config.yaml
+network:
+  interface_name: "enp1s0"  # Your interface name
 ```
 
-### Permission Denied
+### Problem: "ndppd service is not running"
 
-If you get permission errors when binding to ports below 1024:
+**Cause:** ndppd not installed or configured
 
+**Solution:**
 ```bash
-# Option 1: Use a higher port (recommended)
-# Edit config.yaml and set listen_port: 8080
+# Install ndppd
+sudo apt install -y ndppd
 
-# Option 2: Run with sudo (not recommended)
-sudo ./nyxproxy
+# Or run setup script
+sudo ./scripts/quick-setup.sh
 ```
 
-### Interface Not Found
+### Problem: Requests timeout
 
-If the specified interface doesn't exist:
+**Cause:** IPs not properly routed
 
+**Solution:**
 ```bash
-# List available interfaces
-ip addr show
+# Check if subnet is routed to you
+curl --interface 2a05:f480:1800:25db::9999 -6 https://api6.ipify.org
 
-# Update config.yaml with a valid interface name
-# OR set interface_name: "" for auto-detect
+# If it works, the subnet is routed correctly
+# If not, contact your provider
 ```
 
-### Authentication Not Working
+### Problem: Slow startup
 
-Ensure your client is sending credentials:
+**Cause:** Large IP pool
 
-```bash
-# Test SOCKS5
-curl -v --proxy socks5://admin:password@localhost:1080 https://example.com
-
-# Test HTTPS
-curl -v --proxy http://admin:password@localhost:8080 https://example.com
+**Solution:**
+```yaml
+# Reduce pool size for faster startup
+network:
+  ipv6_pool_size: 100  # Instead of 200
 ```
 
-## 📚 Documentation
+### View Logs
 
-- [Configuration Reference](docs/CONFIG.md) - Detailed configuration options
-- [Monitoring Guide](docs/MONITORING.md) - Monitoring and metrics integration
+```bash
+# NyxProxy logs (if running as service)
+sudo journalctl -u nyxproxy -f
+
+# ndppd logs
+sudo journalctl -u ndppd -f
+
+# Check system logs
+dmesg | grep -i ipv6
+```
+
+---
+
+## 🌟 Advanced Usage
+
+### Multiple Proxy Instances
+
+Run multiple proxies on different ports:
+
+```yaml
+# config-8080.yaml
+proxy:
+  listen_port: 8080
+
+# config-8081.yaml
+proxy:
+  listen_port: 8081
+```
+
+```bash
+./nyxproxy &  # Uses config.yaml on port 8080
+./nyxproxy -config config-8081.yaml &  # Port 8081
+```
+
+### Monitoring
+
+```bash
+# Check proxy stats
+curl http://localhost:9090/stats
+
+# Output:
+# {
+#   "active_connections": 45,
+#   "total_requests": 12543,
+#   "ip_pool_size": 200,
+#   "ips_rotated": 38
+# }
+```
+
+---
+
+## 📝 License
+
+MIT License - see [LICENSE](LICENSE) file for details.
+
+---
 
 ## 🤝 Contributing
 
 Contributions are welcome! Please feel free to submit a Pull Request.
 
-1. Fork the repository
-2. Create your feature branch (`git checkout -b feature/AmazingFeature`)
-3. Commit your changes (`git commit -m 'Add some AmazingFeature'`)
-4. Push to the branch (`git push origin feature/AmazingFeature`)
-5. Open a Pull Request
-
-## 📄 License
-
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+---
 
 ## 🙏 Acknowledgments
 
-- Built with [go-socks5](https://github.com/armon/go-socks5)
-- Inspired by the need for flexible proxy solutions
-
-## 📧 Support
-
-- GitHub Issues: [Report a bug](https://github.com/jannik-schroeder/nyxproxy-oss/issues)
-- Discussions: [Ask questions](https://github.com/jannik-schroeder/nyxproxy-oss/discussions)
+- Built with Go
+- Uses ndppd for NDP proxy functionality
+- Inspired by the need for better proxy rotation
 
 ---
 
-Made with ❤️ by [Jannik Schroeder](https://github.com/jannik-schroeder)
+## 📞 Support
+
+- **Issues**: [GitHub Issues](https://github.com/jannik-schroeder/nyxproxy-oss/issues)
+- **Documentation**: See `docs/` folder
+- **German Documentation**: See `SETUP_DE.md`
+
+---
+
+**Made with ❤️ for the privacy-conscious and web scraping community**
