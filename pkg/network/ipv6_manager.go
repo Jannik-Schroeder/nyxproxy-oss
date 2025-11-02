@@ -7,7 +7,6 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
-	"time"
 )
 
 // IPv6Manager manages dynamic IPv6 address generation
