@@ -9,6 +9,7 @@ A flexible, high-performance proxy server supporting both SOCKS5 and HTTPS proto
 
 - **Multiple Proxy Protocols**: Choose between SOCKS5 or HTTPS proxy
 - **Dual Stack Support**: Full IPv4 and IPv6 support with per-interface configuration
+- **IPv6 Rotation**: Dynamic IPv6 address rotation from /64 subnets for enhanced privacy
 - **Network Interface Selection**: Bind to specific network interfaces or auto-detect
 - **Authentication**: Username/password authentication for both proxy types
 - **Monitoring**: Built-in HTTP monitoring endpoints for health checks and statistics
@@ -92,6 +93,8 @@ network:
   interface_name: ""              # empty = auto-detect, or specify like "eth0"
   ipv4_enabled: true
   ipv6_enabled: false
+  rotate_ipv6: false              # Enable IPv6 rotation (requires setup, see below)
+  ipv6_subnet: ""                 # IPv6 /64 subnet for rotation, e.g. "2a05:f480:1800:25db::/64"
 
 monitoring:
   enabled: true
@@ -191,6 +194,138 @@ To list available interfaces, use the setup wizard or check with:
 ```bash
 ip addr show
 ```
+
+## 🔄 IPv6 Rotation
+
+NyxProxy-OSS supports dynamic IPv6 address rotation, allowing each outgoing connection to use a different IPv6 address from your /64 subnet. This significantly enhances privacy and makes it harder to track your connections.
+
+### Prerequisites
+
+- A server with an IPv6 /64 subnet allocation (common with hosting providers like Vultr, Hetzner, etc.)
+- Root access to configure system networking
+- Linux operating system
+
+### Setup
+
+**Option 1: Automated Setup (Recommended)**
+
+Use our setup script to automatically configure your system:
+
+```bash
+# Download the setup script
+wget https://raw.githubusercontent.com/jannik-schroeder/nyxproxy-oss/main/scripts/setup-ipv6-rotation.sh
+
+# Make it executable
+chmod +x setup-ipv6-rotation.sh
+
+# Run as root
+sudo ./setup-ipv6-rotation.sh
+```
+
+The script will:
+- Detect your network interface and IPv6 subnet
+- Configure kernel parameters for IPv6 non-local binding
+- Install and configure ndppd (NDP Proxy Daemon)
+- Enable the service to start automatically
+
+**Option 2: Manual Setup**
+
+If you prefer to configure manually:
+
+```bash
+# 1. Enable IPv6 non-local binding
+sudo sysctl -w net.ipv6.ip_nonlocal_bind=1
+echo "net.ipv6.ip_nonlocal_bind=1" | sudo tee -a /etc/sysctl.conf
+
+# 2. Install ndppd (Debian/Ubuntu)
+sudo apt-get update
+sudo apt-get install -y ndppd
+
+# For CentOS/RHEL:
+# sudo yum install -y ndppd
+
+# 3. Configure ndppd
+sudo tee /etc/ndppd.conf > /dev/null <<EOF
+route-ttl 30000
+
+proxy eth0 {
+    router no
+    timeout 500
+    ttl 30000
+
+    rule 2001:db8::/64 {
+        auto
+    }
+}
+EOF
+
+# Replace 'eth0' with your interface name
+# Replace '2001:db8::/64' with your actual IPv6 subnet
+
+# 4. Enable and start ndppd
+sudo systemctl enable ndppd
+sudo systemctl restart ndppd
+```
+
+### Configuration
+
+After running the setup, configure NyxProxy to use IPv6 rotation:
+
+```yaml
+network:
+  interface_name: "eth0"          # Your network interface
+  ipv4_enabled: false
+  ipv6_enabled: true
+  rotate_ipv6: true               # Enable rotation
+  ipv6_subnet: "2001:db8::/64"    # Your /64 subnet
+```
+
+### Verification
+
+Check that ndppd is running:
+
+```bash
+sudo systemctl status ndppd
+```
+
+Start NyxProxy and test the rotation:
+
+```bash
+# Start the proxy
+./nyxproxy
+
+# Test from another machine
+curl --proxy http://admin:password@your-server:8080 https://api6.ipify.org
+
+# Run multiple times to see different IPv6 addresses
+for i in {1..5}; do
+  curl --proxy http://admin:password@your-server:8080 https://api6.ipify.org
+done
+```
+
+Each request should show a different IPv6 address from your subnet.
+
+### Troubleshooting IPv6 Rotation
+
+**"bind: cannot assign requested address"**
+
+This means the system isn't configured to allow binding to arbitrary IPs in the subnet:
+- Make sure `net.ipv6.ip_nonlocal_bind=1` is set: `sysctl net.ipv6.ip_nonlocal_bind`
+- Ensure ndppd is running: `systemctl status ndppd`
+- Check ndppd logs: `journalctl -u ndppd -n 50`
+
+**ndppd not responding to NDP requests**
+
+Check your firewall allows ICMPv6:
+```bash
+# Allow ICMPv6 (iptables)
+sudo ip6tables -A INPUT -p ipv6-icmp -j ACCEPT
+sudo ip6tables -A OUTPUT -p ipv6-icmp -j ACCEPT
+```
+
+**Want to disable rotation**
+
+Simply set `rotate_ipv6: false` in your config and restart NyxProxy.
 
 ## 🔐 Authentication
 
