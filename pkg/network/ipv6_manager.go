@@ -26,11 +26,39 @@ func NewIPv6Manager(interfaceName string, subnet string) (*IPv6Manager, error) {
 		return nil, fmt.Errorf("invalid subnet: %v", err)
 	}
 
+	// Auto-detect interface if not provided
+	if interfaceName == "" {
+		fmt.Printf("⚠️  WARNING: No interface specified, attempting auto-detection...\n")
+		iface, err := getDefaultInterface()
+		if err != nil {
+			return nil, fmt.Errorf("failed to auto-detect network interface: %v\n"+
+				"Please specify interface_name in config.yaml or set NETWORK_INTERFACE environment variable", err)
+		}
+		interfaceName = iface.Name
+		fmt.Printf("✓ Auto-detected interface: %s\n", interfaceName)
+		fmt.Printf("⚠️  For production use, please set 'interface_name: \"%s\"' in config.yaml\n\n", interfaceName)
+	}
+
+	// Verify the interface exists and is up
+	iface, err := net.InterfaceByName(interfaceName)
+	if err != nil {
+		return nil, fmt.Errorf("network interface '%s' not found: %v\n"+
+			"Run 'ip link show' to see available interfaces", interfaceName, err)
+	}
+
+	if iface.Flags&net.FlagUp == 0 {
+		return nil, fmt.Errorf("network interface '%s' is down\n"+
+			"Run 'ip link set %s up' to enable it", interfaceName, interfaceName)
+	}
+
 	mgr := &IPv6Manager{
 		interfaceName: interfaceName,
 		subnet:        ipnet,
 		assignedIPs:   make(map[string]time.Time),
 	}
+
+	// Check if ndppd is running (warning only, not fatal)
+	WarnIfNdppdNotRunning()
 
 	// Start cleanup goroutine to remove old IPs
 	mgr.cleanupTicker = time.NewTicker(5 * time.Minute)
