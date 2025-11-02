@@ -84,7 +84,13 @@ func NewProxy(cfg *config.ProxyConfig) (*Proxy, error) {
 	// Initialize IPv6 Manager if rotating IPv6 is enabled
 	if cfg.Network.RotateIPv6 && cfg.Network.IPv6Subnet != "" {
 		var err error
-		ipv6Manager, err = network.NewIPv6Manager(cfg.Network.InterfaceName, cfg.Network.IPv6Subnet)
+		ipv6Manager, err = network.NewIPv6Manager(
+			cfg.Network.InterfaceName,
+			cfg.Network.IPv6Subnet,
+			cfg.Network.IPv6PoolSize,
+			cfg.Network.IPv6MaxUsage,
+			cfg.Network.IPv6MaxAge,
+		)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create IPv6 manager: %v", err)
 		}

@@ -36,6 +36,19 @@ network:
   # The IPs are automatically assigned to the interface before use
   rotate_ipv6: false
 
+  # IPv6 Rotation Settings (only used if rotate_ipv6 is true)
+  # Number of IPs in the rotation pool (default: 200)
+  # Larger pool = more IPs but longer startup time
+  ipv6_pool_size: 200
+
+  # Max number of times an IP can be used before rotation (default: 100)
+  # Lower = more frequent rotation, higher = less overhead
+  ipv6_max_usage: 100
+
+  # Max age in minutes before an IP is rotated (default: 30)
+  # After this time, IP will be replaced with a fresh one
+  ipv6_max_age: 30
+
 monitoring:
   # Enable monitoring endpoint
   enabled: true

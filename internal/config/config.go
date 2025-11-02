@@ -46,6 +46,12 @@ type NetworkSettings struct {
 	IPv6Subnet string `yaml:"ipv6_subnet"`
 	// RotateIPv6 enables rotating IPv6 addresses from the subnet
 	RotateIPv6 bool `yaml:"rotate_ipv6"`
+	// IPv6PoolSize is the number of IPs in the rotation pool (default: 200)
+	IPv6PoolSize int `yaml:"ipv6_pool_size"`
+	// IPv6MaxUsage is the max number of times an IP can be used before rotation (default: 100)
+	IPv6MaxUsage int `yaml:"ipv6_max_usage"`
+	// IPv6MaxAge is the max age in minutes before an IP is rotated (default: 30)
+	IPv6MaxAge int `yaml:"ipv6_max_age"`
 }
 
 // MonitoringSettings contains monitoring endpoint configuration

@@ -30,8 +30,8 @@ type IPv6Manager struct {
 	rotationStop  chan bool           // Channel to stop the rotation goroutine
 }
 
-// NewIPv6Manager creates a new IPv6 manager
-func NewIPv6Manager(interfaceName string, subnet string) (*IPv6Manager, error) {
+// NewIPv6Manager creates a new IPv6 manager with configurable rotation settings
+func NewIPv6Manager(interfaceName string, subnet string, poolSize, maxUsage, maxAgeMinutes int) (*IPv6Manager, error) {
 	_, ipnet, err := net.ParseCIDR(subnet)
 	if err != nil {
 		return nil, fmt.Errorf("invalid subnet: %v", err)
@@ -62,14 +62,25 @@ func NewIPv6Manager(interfaceName string, subnet string) (*IPv6Manager, error) {
 			"Run 'ip link set %s up' to enable it", interfaceName, interfaceName)
 	}
 
+	// Apply defaults if values are 0 or negative
+	if poolSize <= 0 {
+		poolSize = 200
+	}
+	if maxUsage <= 0 {
+		maxUsage = 100
+	}
+	if maxAgeMinutes <= 0 {
+		maxAgeMinutes = 30
+	}
+
 	mgr := &IPv6Manager{
 		interfaceName: interfaceName,
 		subnet:        ipnet,
 		ipPool:        make([]net.IP, 0),
 		ipStats:       make(map[string]*IPStats),
 		poolIndex:     0,
-		maxUsageCount: 100,              // Replace IP after 100 uses
-		maxAge:        30 * time.Minute, // Replace IP after 30 minutes
+		maxUsageCount: maxUsage,
+		maxAge:        time.Duration(maxAgeMinutes) * time.Minute,
 		rotationStop:  make(chan bool),
 	}
 
@@ -79,12 +90,11 @@ func NewIPv6Manager(interfaceName string, subnet string) (*IPv6Manager, error) {
 	fmt.Printf("✓ IPv6 rotation mode: IP Pool with dynamic rotation\n")
 	fmt.Printf("  Interface: %s\n", interfaceName)
 	fmt.Printf("  Subnet: %s\n", ipnet.String())
-	fmt.Printf("  Pool size: 200 IPs\n")
+	fmt.Printf("  Pool size: %d IPs\n", poolSize)
 	fmt.Printf("  Rotation: Every %d uses or %v\n", mgr.maxUsageCount, mgr.maxAge)
 	fmt.Printf("  Initializing IP pool...\n")
 
-	// Pre-populate IP pool (default: 200 IPs)
-	poolSize := 200
+	// Pre-populate IP pool
 	if err := mgr.populateIPPool(poolSize); err != nil {
 		return nil, fmt.Errorf("failed to populate IP pool: %v", err)
 	}
@@ -197,14 +207,11 @@ func (m *IPv6Manager) checkAndRotateIPs() {
 
 		// Check if IP should be rotated
 		shouldRotate := false
-		reason := ""
 
 		if stats.usageCount >= m.maxUsageCount {
 			shouldRotate = true
-			reason = fmt.Sprintf("used %d times", stats.usageCount)
 		} else if now.Sub(stats.addedAt) >= m.maxAge {
 			shouldRotate = true
-			reason = fmt.Sprintf("age %v", now.Sub(stats.addedAt).Round(time.Minute))
 		}
 
 		if shouldRotate {
