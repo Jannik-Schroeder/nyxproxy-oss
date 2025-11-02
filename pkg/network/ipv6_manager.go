@@ -5,6 +5,7 @@ import (
 	"math/rand"
 	"net"
 	"os/exec"
+	"strings"
 	"sync"
 	"time"
 )
@@ -38,9 +39,9 @@ func NewIPv6Manager(interfaceName string, subnet string) (*IPv6Manager, error) {
 	return mgr, nil
 }
 
-// GetRandomIPv6 generates a random IPv6 address from the subnet
-// For /64 subnets, most hosting providers route the entire subnet to your server,
-// so you can bind to any IP in the range without explicitly adding it to the interface
+// GetRandomIPv6 generates a random IPv6 address from the subnet and assigns it to the interface
+// Even though the subnet is routed to us, we need to add IPs to the interface so Linux knows
+// how to route outbound packets from these source addresses
 func (m *IPv6Manager) GetRandomIPv6() (net.IP, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -48,7 +49,17 @@ func (m *IPv6Manager) GetRandomIPv6() (net.IP, error) {
 	// Generate random IPv6 in the subnet
 	ip := m.generateRandomIPv6()
 
-	// Track the IP (for monitoring/cleanup if needed)
+	// Add IP to interface - ignore "file exists" errors (IP already added)
+	if err := m.assignIPToInterface(ip); err != nil {
+		// Only return error if it's not an "already exists" error
+		errStr := err.Error()
+		if !strings.Contains(errStr, "File exists") && !strings.Contains(errStr, "RTNETLINK answers") {
+			return nil, err
+		}
+		// IP already exists, continue anyway
+	}
+
+	// Track the IP for cleanup
 	m.assignedIPs[ip.String()] = time.Now()
 
 	return ip, nil
@@ -79,11 +90,16 @@ func (m *IPv6Manager) assignIPToInterface(ip net.IP) error {
 	cmd := exec.Command("ip", "-6", "addr", "add", fmt.Sprintf("%s/128", ip.String()), "dev", m.interfaceName)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		// Ignore error if IP already exists
-		if string(output) == "" || len(output) == 0 {
+		outputStr := string(output)
+		// Check if error is because IP already exists - this is OK
+		if strings.Contains(outputStr, "File exists") || strings.Contains(outputStr, "RTNETLINK answers: File exists") {
 			return nil
 		}
-		return fmt.Errorf("failed to add IP: %v, output: %s", err, string(output))
+		// For any other error, return it
+		if len(outputStr) > 0 {
+			return fmt.Errorf("failed to add IP %s: %v, output: %s", ip.String(), err, outputStr)
+		}
+		return fmt.Errorf("failed to add IP %s: %v", ip.String(), err)
 	}
 	return nil
 }
@@ -99,16 +115,18 @@ func (m *IPv6Manager) removeIPFromInterface(ip string) error {
 	return nil
 }
 
-// cleanupLoop periodically cleans up old IP entries from tracking (older than 10 minutes)
-// Since we don't add IPs to the interface, we just remove them from our tracking map
+// cleanupLoop periodically removes old IPs (older than 10 minutes)
 func (m *IPv6Manager) cleanupLoop() {
 	for range m.cleanupTicker.C {
 		m.mu.Lock()
 		now := time.Now()
 		for ip, assignedTime := range m.assignedIPs {
 			if now.Sub(assignedTime) > 10*time.Minute {
-				// Remove from tracking map
-				delete(m.assignedIPs, ip)
+				// Remove old IP from interface
+				if err := m.removeIPFromInterface(ip); err == nil {
+					delete(m.assignedIPs, ip)
+				}
+				// If removal fails, try again next time
 			}
 		}
 		m.mu.Unlock()
@@ -121,8 +139,11 @@ func (m *IPv6Manager) Stop() {
 		m.cleanupTicker.Stop()
 	}
 
-	// Clear tracking map
+	// Clean up all assigned IPs
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	for ip := range m.assignedIPs {
+		m.removeIPFromInterface(ip)
+	}
 	m.assignedIPs = make(map[string]time.Time)
 }
