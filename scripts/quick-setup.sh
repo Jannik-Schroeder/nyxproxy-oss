@@ -150,6 +150,21 @@ while [ -z "$PROXY_PASS" ]; do
     echo
 done
 
+# Ask for rotation settings
+echo
+echo "  IPv6 Rotation Settings:"
+echo -n "  IP Pool size [200]: "
+read POOL_SIZE
+POOL_SIZE=${POOL_SIZE:-200}
+
+echo -n "  Max uses per IP before rotation [100]: "
+read MAX_USAGE
+MAX_USAGE=${MAX_USAGE:-100}
+
+echo -n "  Max age in minutes before rotation [30]: "
+read MAX_AGE
+MAX_AGE=${MAX_AGE:-30}
+
 # Create config.yaml
 cat > ../config.yaml <<EOF
 # NyxProxy Configuration
@@ -168,6 +183,9 @@ network:
   ipv6_enabled: true
   rotate_ipv6: true
   ipv6_subnet: "$IPV6_SUBNET"
+  ipv6_pool_size: $POOL_SIZE
+  ipv6_max_usage: $MAX_USAGE
+  ipv6_max_age: $MAX_AGE
 
 monitoring:
   enabled: true
