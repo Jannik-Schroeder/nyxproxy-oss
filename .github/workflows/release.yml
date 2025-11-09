@@ -40,12 +40,9 @@ jobs:
           GOOS=linux GOARCH=amd64 go build -ldflags "${BUILD_FLAGS}" -o dist/nyxproxy-linux-amd64 ./cmd/proxy
           GOOS=linux GOARCH=arm64 go build -ldflags "${BUILD_FLAGS}" -o dist/nyxproxy-linux-arm64 ./cmd/proxy
 
-          # Build setup tool for Linux (both amd64 and arm64)
-          GOOS=linux GOARCH=amd64 go build -ldflags "${BUILD_FLAGS}" -o dist/nyxproxy-setup-linux-amd64 ./cmd/setup
-          GOOS=linux GOARCH=arm64 go build -ldflags "${BUILD_FLAGS}" -o dist/nyxproxy-setup-linux-arm64 ./cmd/setup
-
-          # Copy example config
+          # Copy example config and setup script
           cp config.example.yaml dist/
+          cp scripts/quick-setup.sh dist/
 
       - name: Create Release
         uses: softprops/action-gh-release@v1
@@ -53,7 +50,6 @@ jobs:
           files: |
             dist/nyxproxy-linux-amd64
             dist/nyxproxy-linux-arm64
-            dist/nyxproxy-setup-linux-amd64
-            dist/nyxproxy-setup-linux-arm64
             dist/config.example.yaml
+            dist/quick-setup.sh
           generate_release_notes: true

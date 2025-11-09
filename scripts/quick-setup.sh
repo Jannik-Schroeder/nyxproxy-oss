@@ -199,7 +199,7 @@ EOF
 echo "  ✓ config.yaml created"
 echo
 
-echo -e "${BLUE}[5/5] Testing configuration...${NC}"
+echo -e "${BLUE}[5/7] Testing configuration...${NC}"
 
 # Test IP binding
 TEST_IP="${IPV6_BASE}::9999"
@@ -207,6 +207,116 @@ if timeout 2 bash -c "exec 3<>/dev/tcp/[::1]/80 2>&1" 2>/dev/null; then
     :
 fi
 echo "  ✓ IPv6 stack operational"
+echo
+
+echo -e "${BLUE}[6/7] Downloading NyxProxy executable...${NC}"
+
+# Detect architecture
+ARCH=$(uname -m)
+case $ARCH in
+    x86_64)
+        ARCH_NAME="amd64"
+        ;;
+    aarch64|arm64)
+        ARCH_NAME="arm64"
+        ;;
+    *)
+        echo -e "${RED}✗ Unsupported architecture: $ARCH${NC}"
+        exit 1
+        ;;
+esac
+echo "  ✓ Detected architecture: $ARCH_NAME"
+
+# Get latest release version
+REPO="jannik-schroeder/nyxproxy-oss"
+RELEASE_URL="https://api.github.com/repos/$REPO/releases/latest"
+
+echo "  Fetching latest release info..."
+LATEST_RELEASE=$(curl -s $RELEASE_URL)
+VERSION=$(echo "$LATEST_RELEASE" | grep -Po '"tag_name": "\K.*?(?=")')
+
+if [ -z "$VERSION" ]; then
+    echo -e "${RED}✗ Could not fetch latest release${NC}"
+    echo "  You can manually download from: https://github.com/$REPO/releases"
+    exit 1
+fi
+
+echo "  ✓ Latest version: $VERSION"
+
+# Download binary
+BINARY_NAME="nyxproxy-linux-${ARCH_NAME}"
+DOWNLOAD_URL="https://github.com/$REPO/releases/download/$VERSION/$BINARY_NAME"
+
+echo "  Downloading $BINARY_NAME..."
+if ! curl -L -o nyxproxy "$DOWNLOAD_URL" 2>/dev/null; then
+    echo -e "${RED}✗ Failed to download binary${NC}"
+    echo "  Download URL: $DOWNLOAD_URL"
+    exit 1
+fi
+
+chmod +x nyxproxy
+echo "  ✓ Downloaded and installed nyxproxy"
+echo
+
+echo -e "${BLUE}[7/7] Daemon setup...${NC}"
+echo -n "  Do you want to install NyxProxy as a systemd service? (y/N) "
+read -n 1 -r DAEMON_CHOICE
+echo
+echo
+
+if [[ $DAEMON_CHOICE =~ ^[Yy]$ ]]; then
+    # Get current directory (where the binary is)
+    INSTALL_DIR=$(pwd)
+
+    # Create systemd service file
+    cat > /etc/systemd/system/nyxproxy.service <<EOF
+[Unit]
+Description=NyxProxy IPv6 Rotating Proxy
+After=network.target ndppd.service
+Requires=ndppd.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=$INSTALL_DIR
+ExecStart=$INSTALL_DIR/nyxproxy
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    echo "  ✓ Systemd service created"
+
+    # Reload systemd and enable service
+    systemctl daemon-reload
+    systemctl enable nyxproxy > /dev/null 2>&1
+    echo "  ✓ Service enabled (auto-start on boot)"
+
+    # Ask if should start now
+    echo -n "  Start NyxProxy now? (Y/n) "
+    read -n 1 -r START_NOW
+    echo
+
+    if [[ ! $START_NOW =~ ^[Nn]$ ]]; then
+        systemctl start nyxproxy
+
+        # Wait a moment and check status
+        sleep 2
+        if systemctl is-active --quiet nyxproxy; then
+            echo "  ✓ NyxProxy service is running"
+        else
+            echo -e "${RED}  ✗ Service failed to start${NC}"
+            echo "    Check logs: journalctl -u nyxproxy -n 20"
+        fi
+    else
+        echo "  Service installed but not started"
+        echo "  Start with: systemctl start nyxproxy"
+    fi
+else
+    echo "  ✓ Skipped daemon installation"
+fi
 echo
 
 echo -e "${GREEN}╔═══════════════════════════════════════╗${NC}"
@@ -219,13 +329,29 @@ echo "  IPv6 Subnet:  $IPV6_SUBNET"
 echo "  Proxy Type:   HTTPS"
 echo "  Listen Port:  8080"
 echo "  Username:     $PROXY_USER"
+echo "  Binary:       $(pwd)/nyxproxy"
 echo
-echo -e "${YELLOW}Next steps:${NC}"
-echo "  1. Build NyxProxy: go build -o nyxproxy cmd/nyxproxy/main.go"
-echo "  2. Start proxy:    ./nyxproxy"
-echo "  3. Test with:      curl --proxy http://$PROXY_USER:***@YOUR_SERVER_IP:8080 https://api6.ipify.org"
+
+if [[ $DAEMON_CHOICE =~ ^[Yy]$ ]]; then
+    echo -e "${GREEN}Service Management:${NC}"
+    echo "  Status:       systemctl status nyxproxy"
+    echo "  Start:        systemctl start nyxproxy"
+    echo "  Stop:         systemctl stop nyxproxy"
+    echo "  Restart:      systemctl restart nyxproxy"
+    echo "  Logs:         journalctl -u nyxproxy -f"
+    echo
+    echo -e "${GREEN}ndppd Service:${NC}"
+    echo "  Status:       systemctl status ndppd"
+    echo "  Logs:         journalctl -u ndppd -f"
+else
+    echo -e "${YELLOW}Manual Start:${NC}"
+    echo "  Start proxy:  ./nyxproxy"
+    echo
+    echo -e "${YELLOW}Service Management:${NC}"
+    echo "  Check ndppd:  systemctl status ndppd"
+    echo "  View logs:    journalctl -u ndppd -f"
+fi
 echo
-echo -e "${YELLOW}Service management:${NC}"
-echo "  Check ndppd:  systemctl status ndppd"
-echo "  View logs:    journalctl -u ndppd -f"
+echo -e "${GREEN}Test your proxy:${NC}"
+echo "  curl --proxy http://$PROXY_USER:***@YOUR_SERVER_IP:8080 https://api6.ipify.org"
 echo

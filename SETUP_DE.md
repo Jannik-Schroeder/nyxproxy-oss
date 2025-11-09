@@ -2,30 +2,30 @@
 
 ## 🚀 Schnellstart (Debian/Ubuntu)
 
-Die einfachste Methode für Debian/Ubuntu Server:
+Die einfachste Methode - **nur ein Befehl**:
 
 ```bash
-# 1. Als root einloggen oder sudo verwenden
-sudo -i
-
-# 2. Ins NyxProxy Verzeichnis wechseln
-cd /pfad/zu/nyxproxy-core
-
-# 3. Quick-Setup ausführen
-chmod +x scripts/quick-setup.sh
-./scripts/quick-setup.sh
-
-# 4. NyxProxy bauen und starten
-go build -o nyxproxy cmd/nyxproxy/main.go
-./nyxproxy
+wget https://raw.githubusercontent.com/jannik-schroeder/nyxproxy-oss/main/scripts/quick-setup.sh && chmod +x quick-setup.sh && sudo ./quick-setup.sh
 ```
 
-Das war's! Der Script richtet alles automatisch ein:
-- ✅ Erkennt automatisch dein Netzwerk-Interface
-- ✅ Erkennt automatisch dein IPv6 Subnet
-- ✅ Installiert und konfiguriert ndppd
-- ✅ Erstellt config.yaml mit deinen Einstellungen
-- ✅ Startet alle benötigten Services
+**Das war's!** Der Script erledigt alles automatisch:
+1. Erkennt automatisch dein Netzwerk-Interface
+2. Erkennt automatisch dein IPv6 /64 Subnet
+3. Installiert und konfiguriert ndppd (NDP Proxy)
+4. Setzt Kernel-Parameter für IPv6 Routing
+5. Erstellt optimierte config.yaml mit deinen Einstellungen
+6. **Lädt die neueste NyxProxy Binary** von GitHub herunter
+7. **Optional: Installation als Systemd Service** (Daemon-Modus)
+8. **Optional: Startet den Proxy sofort**
+
+**Während des Setups wirst du gefragt:**
+- Proxy Benutzername (Standard: admin)
+- Proxy Passwort (erforderlich)
+- IP Pool Größe (Standard: 200)
+- Max. Verwendungen pro IP (Standard: 100)
+- IP Alter-Limit in Minuten (Standard: 30)
+- Als Systemd Service installieren? (y/N)
+- NyxProxy jetzt starten? (Y/n)
 
 ---
 
