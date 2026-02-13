@@ -62,13 +62,6 @@ func (m *Metrics) SetIPPoolSize(size int) {
 	m.ipPoolSize = size
 }
 
-// IncrementIPsRotated increments the IPs rotated counter
-func (m *Metrics) IncrementIPsRotated(count int64) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.ipsRotated += count
-}
-
 // SetIPsRotated sets the IPs rotated counter to a specific value
 func (m *Metrics) SetIPsRotated(count int64) {
 	m.mu.Lock()
