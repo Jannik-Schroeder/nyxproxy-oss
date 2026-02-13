@@ -28,6 +28,7 @@ type IPv6Manager struct {
 	maxUsageCount int                 // Max times an IP can be used before rotation
 	maxAge        time.Duration       // Max age of an IP before rotation
 	rotationStop  chan bool           // Channel to stop the rotation goroutine
+	totalRotated  int64               // Total number of IPs rotated
 }
 
 // NewIPv6Manager creates a new IPv6 manager with configurable rotation settings
@@ -244,6 +245,7 @@ func (m *IPv6Manager) checkAndRotateIPs() {
 	}
 
 	if rotatedCount > 0 {
+		m.totalRotated += int64(rotatedCount)
 		fmt.Printf("✓ Rotated %d IPs (%s)\n", rotatedCount, time.Now().Format("15:04:05"))
 	}
 }
@@ -316,4 +318,18 @@ func (m *IPv6Manager) Stop() {
 	m.ipPool = nil
 	m.ipStats = nil
 	fmt.Printf("✓ IP pool cleaned up\n")
+}
+
+// GetPoolSize returns the current size of the IP pool
+func (m *IPv6Manager) GetPoolSize() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.ipPool)
+}
+
+// GetTotalRotated returns the total number of IPs that have been rotated
+func (m *IPv6Manager) GetTotalRotated() int64 {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.totalRotated
 }
