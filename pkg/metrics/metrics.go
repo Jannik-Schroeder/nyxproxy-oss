@@ -14,6 +14,8 @@ type Metrics struct {
 	bytesSent         int64
 	bytesReceived     int64
 	interfaceName     string
+	ipPoolSize        int
+	ipsRotated        int64
 }
 
 // New creates a new Metrics instance
@@ -53,6 +55,27 @@ func (m *Metrics) AddBytesReceived(bytes int64) {
 	m.bytesReceived += bytes
 }
 
+// SetIPPoolSize sets the IP pool size
+func (m *Metrics) SetIPPoolSize(size int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.ipPoolSize = size
+}
+
+// IncrementIPsRotated increments the IPs rotated counter
+func (m *Metrics) IncrementIPsRotated(count int64) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.ipsRotated += count
+}
+
+// SetIPsRotated sets the IPs rotated counter to a specific value
+func (m *Metrics) SetIPsRotated(count int64) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.ipsRotated = count
+}
+
 // GetStats returns current statistics
 func (m *Metrics) GetStats() Stats {
 	m.mu.RLock()
@@ -62,9 +85,12 @@ func (m *Metrics) GetStats() Stats {
 		Uptime:            time.Since(m.startTime).String(),
 		ActiveConnections: m.activeConnections,
 		TotalConnections:  m.totalConnections,
+		TotalRequests:     m.totalConnections, // Alias for compatibility with docs
 		BytesSent:         m.bytesSent,
 		BytesReceived:     m.bytesReceived,
 		Interface:         m.interfaceName,
+		IPPoolSize:        m.ipPoolSize,
+		IPsRotated:        m.ipsRotated,
 	}
 }
 
@@ -73,7 +99,10 @@ type Stats struct {
 	Uptime            string `json:"uptime"`
 	ActiveConnections int64  `json:"active_connections"`
 	TotalConnections  int64  `json:"total_connections"`
+	TotalRequests     int64  `json:"total_requests"`
 	BytesSent         int64  `json:"bytes_sent"`
 	BytesReceived     int64  `json:"bytes_received"`
 	Interface         string `json:"interface"`
+	IPPoolSize        int    `json:"ip_pool_size"`
+	IPsRotated        int64  `json:"ips_rotated"`
 }

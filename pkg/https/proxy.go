@@ -493,6 +493,11 @@ func (p *Proxy) Stop() error {
 	return p.httpServer.Close()
 }
 
+// GetIPv6Manager returns the IPv6 manager if it exists
+func GetIPv6Manager() *network.IPv6Manager {
+	return ipv6Manager
+}
+
 // getRandomIPv6 generates a random IPv6 address within the /64 subnet
 func getRandomIPv6(baseIP net.IP) net.IP {
 	ip := make(net.IP, len(baseIP))

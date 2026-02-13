@@ -277,3 +277,8 @@ func (p *Proxy) Start() error {
 func (p *Proxy) Stop() error {
 	return nil
 }
+
+// GetIPv6Manager returns the IPv6 manager if it exists
+func GetIPv6Manager() *network.IPv6Manager {
+	return ipv6Manager
+}

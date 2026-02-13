@@ -8,11 +8,13 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/jannik-schroeder/nyxproxy-oss/internal/config"
 	"github.com/jannik-schroeder/nyxproxy-oss/pkg/https"
 	"github.com/jannik-schroeder/nyxproxy-oss/pkg/metrics"
 	"github.com/jannik-schroeder/nyxproxy-oss/pkg/monitoring"
+	"github.com/jannik-schroeder/nyxproxy-oss/pkg/network"
 	"github.com/jannik-schroeder/nyxproxy-oss/pkg/socks5"
 	"github.com/jannik-schroeder/nyxproxy-oss/pkg/version"
 )
@@ -68,6 +70,25 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to create proxy: %v", err)
 	}
+
+	// Start a goroutine to periodically update IPv6 stats in metrics
+	go func() {
+		ticker := time.NewTicker(10 * time.Second)
+		defer ticker.Stop()
+		for range ticker.C {
+			var mgr *network.IPv6Manager
+			switch cfg.GetProxyType() {
+			case "socks5":
+				mgr = socks5.GetIPv6Manager()
+			case "https":
+				mgr = https.GetIPv6Manager()
+			}
+			if mgr != nil {
+				metricsCollector.SetIPPoolSize(mgr.GetPoolSize())
+				metricsCollector.SetIPsRotated(mgr.GetTotalRotated())
+			}
+		}
+	}()
 
 	// Setup signal handling for graceful shutdown
 	sigChan := make(chan os.Signal, 1)
