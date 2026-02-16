@@ -588,21 +588,21 @@ dmesg | grep -i ipv6
 
 ### Multiple Proxy Instances
 
-Run multiple proxies on different ports:
+NyxProxy currently always reads `config.yaml` from the current working directory.
 
-```yaml
-# config-8080.yaml
-proxy:
-  listen_port: 8080
-
-# config-8081.yaml
-proxy:
-  listen_port: 8081
-```
+Run multiple proxies on different ports by using separate directories (each with its own `config.yaml`):
 
 ```bash
-./nyxproxy &  # Uses config.yaml on port 8080
-./nyxproxy -config config-8081.yaml &  # Port 8081
+mkdir -p proxy-8080 proxy-8081
+cp nyxproxy proxy-8080/nyxproxy
+cp nyxproxy proxy-8081/nyxproxy
+
+# Create and edit separate configs
+cp config.example.yaml proxy-8080/config.yaml
+cp config.example.yaml proxy-8081/config.yaml
+
+(cd proxy-8080 && sudo ./nyxproxy) &
+(cd proxy-8081 && sudo ./nyxproxy) &
 ```
 
 ### Monitoring
@@ -613,8 +613,13 @@ curl http://localhost:9090/stats
 
 # Output:
 # {
-#   "active_connections": 45,
-#   "total_requests": 12543,
+#   "uptime": "5h23m15s",
+#   "active_connections": 0,
+#   "total_connections": 0,
+#   "total_requests": 0,
+#   "bytes_sent": 0,
+#   "bytes_received": 0,
+#   "interface": "eth0",
 #   "ip_pool_size": 200,
 #   "ips_rotated": 38
 # }
