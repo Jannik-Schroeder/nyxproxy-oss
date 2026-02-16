@@ -52,8 +52,6 @@ Feature requests are welcome! Please:
 4. **Test Your Changes**
    ```bash
    go build ./cmd/proxy
-   go build ./cmd/setup
-   ./nyxproxy-setup
    ./nyxproxy
    ```
 
@@ -95,10 +93,8 @@ go mod download
 
 # Build
 go build -o nyxproxy ./cmd/proxy
-go build -o nyxproxy-setup ./cmd/setup
 
 # Run
-./nyxproxy-setup
 ./nyxproxy
 ```
 
@@ -108,7 +104,6 @@ go build -o nyxproxy-setup ./cmd/setup
 nyxproxy-oss/
 ├── cmd/
 │   ├── proxy/          # Main proxy application
-│   └── setup/          # Interactive setup wizard
 ├── internal/
 │   └── config/         # Configuration management
 ├── pkg/
@@ -168,7 +163,6 @@ When adding configuration options:
 1. Update `internal/config/config.go`
 2. Update `config.example.yaml`
 3. Update `docs/CONFIG.md`
-4. Add to setup wizard in `cmd/setup/main.go`
 
 ## Testing
 
@@ -182,8 +176,7 @@ Currently, testing is manual. Automated tests are welcome contributions!
 - [ ] Interface selection works
 - [ ] IPv4/IPv6 selection works
 - [ ] Monitoring endpoints respond
-- [ ] Setup wizard completes successfully
-- [ ] Config file is generated correctly
+- [ ] Config file loads and validation works
 
 ## Documentation
 

@@ -7,7 +7,7 @@ NyxProxy-OSS includes built-in monitoring capabilities through HTTP endpoints. T
 The monitoring server provides three main endpoints:
 
 - `/health` - Health check and uptime
-- `/stats` - Connection and bandwidth statistics
+- `/stats` - Runtime statistics (some counters may be 0)
 - `/config` - Current configuration (sanitized)
 
 ## Enabling Monitoring
@@ -72,11 +72,14 @@ curl http://localhost:9090/stats
 ```json
 {
   "uptime": "5h23m15s",
-  "active_connections": 12,
-  "total_connections": 4523,
-  "bytes_sent": 1048576000,
-  "bytes_received": 524288000,
-  "interface": "eth0"
+  "active_connections": 0,
+  "total_connections": 0,
+  "total_requests": 0,
+  "bytes_sent": 0,
+  "bytes_received": 0,
+  "interface": "eth0",
+  "ip_pool_size": 200,
+  "ips_rotated": 38
 }
 ```
 
@@ -84,9 +87,14 @@ curl http://localhost:9090/stats
 - `uptime` - How long the proxy has been running
 - `active_connections` - Currently active proxy connections
 - `total_connections` - Total connections since startup
+- `total_requests` - Alias for total connections (compatibility field)
 - `bytes_sent` - Total bytes sent through the proxy
 - `bytes_received` - Total bytes received through the proxy
 - `interface` - Network interface being used (or "auto-detect")
+- `ip_pool_size` - Current IPv6 pool size (0 if rotation disabled)
+- `ips_rotated` - Total number of IPv6 addresses rotated (0 if rotation disabled)
+
+**Note**: Connection and byte counters are not fully instrumented yet and may remain `0` even while the proxy is handling traffic.
 
 **Use Cases**:
 - Performance monitoring

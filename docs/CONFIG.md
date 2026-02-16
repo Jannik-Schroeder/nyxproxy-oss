@@ -4,7 +4,11 @@ This document provides detailed information about all configuration options avai
 
 ## Configuration File
 
-NyxProxy-OSS uses YAML for configuration. The default configuration file is `config.yaml` in the same directory as the binary.
+NyxProxy-OSS uses YAML for configuration.
+
+NyxProxy reads `config.yaml` from the **current working directory** (CWD). In systemd, this is the unit's `WorkingDirectory=`.
+
+If no `config.yaml` is present, NyxProxy falls back to legacy environment variables (see below).
 
 ## Configuration Structure
 
@@ -20,6 +24,11 @@ network:
   interface_name: string
   ipv4_enabled: boolean
   ipv6_enabled: boolean
+  rotate_ipv6: boolean
+  ipv6_subnet: string
+  ipv6_pool_size: integer
+  ipv6_max_usage: integer
+  ipv6_max_age: integer
 
 monitoring:
   enabled: boolean
@@ -37,7 +46,7 @@ logging:
 - **Type**: `string`
 - **Required**: Yes
 - **Values**: `socks5` or `https`
-- **Default**: `socks5`
+- **Default**: No implicit default when using `config.yaml` (use `config.example.yaml` as a starting point)
 
 The type of proxy server to run.
 
@@ -51,7 +60,7 @@ proxy:
 
 - **Type**: `string`
 - **Required**: Yes
-- **Default**: `0.0.0.0`
+- **Default**: No implicit default when using `config.yaml` (use `config.example.yaml` as a starting point)
 
 The IP address to bind the proxy server to.
 
@@ -70,7 +79,7 @@ proxy:
 - **Type**: `integer`
 - **Required**: Yes
 - **Range**: 1-65535
-- **Default**: `1080` (SOCKS5) or `8080` (HTTPS)
+- **Default**: No implicit default when using `config.yaml` (use `config.example.yaml` as a starting point)
 
 The port number to listen on.
 
@@ -143,7 +152,7 @@ ifconfig
 
 - **Type**: `boolean`
 - **Required**: Yes
-- **Default**: `true`
+- **Default**: `true` (env fallback)
 
 Enable IPv4 for outgoing connections.
 
@@ -169,13 +178,63 @@ network:
   ipv6_enabled: false
 ```
 
+### `network.rotate_ipv6`
+
+- **Type**: `boolean`
+- **Required**: No
+- **Default**: `false` (env fallback)
+
+Enable IPv6 rotation using a pre-populated pool of random IPv6 addresses from `network.ipv6_subnet`.
+
+**Notes**:
+- Linux only; requires root (or `CAP_NET_ADMIN`) because NyxProxy assigns/removes IPv6 addresses on the interface.
+- NyxProxy will warn if `ndppd` is not running; for most providers you must configure `ndppd` for the routed `/64`.
+
+### `network.ipv6_subnet`
+
+- **Type**: `string`
+- **Required**: Yes (if `network.rotate_ipv6` is `true`)
+
+IPv6 subnet (typically a routed `/64`) used to generate random outgoing IPv6 addresses.
+
+**Example**:
+```yaml
+network:
+  rotate_ipv6: true
+  ipv6_subnet: "2a05:f480:1800:25db::/64"
+```
+
+### `network.ipv6_pool_size`
+
+- **Type**: `integer`
+- **Required**: No
+- **Default**: `200`
+
+How many IPv6 addresses NyxProxy assigns to the interface at startup.
+
+### `network.ipv6_max_usage`
+
+- **Type**: `integer`
+- **Required**: No
+- **Default**: `100`
+
+Rotate an IP after it has been used this many times.
+
+### `network.ipv6_max_age`
+
+- **Type**: `integer`
+- **Required**: No
+- **Default**: `30`
+
+Rotate an IP after this many minutes.
+
 ## Monitoring Settings
 
 ### `monitoring.enabled`
 
 - **Type**: `boolean`
 - **Required**: No
-- **Default**: `true`
+- **Default**: `true` (env fallback)
 
 Enable the monitoring HTTP server.
 
@@ -190,7 +249,7 @@ monitoring:
 - **Type**: `integer`
 - **Required**: No (if monitoring is enabled)
 - **Range**: 1-65535
-- **Default**: `9090`
+- **Default**: `9090` (env fallback)
 
 The port for the monitoring HTTP server.
 
@@ -204,7 +263,7 @@ monitoring:
 
 - **Type**: `boolean`
 - **Required**: No
-- **Default**: `false`
+- **Default**: `false` (env fallback)
 
 Allow remote access to the monitoring endpoints.
 
@@ -226,7 +285,7 @@ monitoring:
 - **Type**: `integer`
 - **Required**: No
 - **Range**: 0-2
-- **Default**: `1`
+- **Default**: No implicit default when using `config.yaml` (env fallback uses `0`)
 
 Control the verbosity of log output.
 
@@ -260,6 +319,17 @@ For backward compatibility, these environment variables are supported:
 
 **Note**: Configuration file settings take precedence over environment variables.
 
+If you run without a `config.yaml`, NyxProxy uses these defaults:
+- `PROXY_TYPE=https`
+- `PROXY_LISTEN_ADDRESS=0.0.0.0`
+- `PROXY_LISTEN_PORT=8080`
+- `PROXY_PROTOCOL=4` (IPv4 outbound)
+- `MONITORING_ENABLED=true`, `MONITORING_PORT=9090`, `MONITORING_ALLOW_REMOTE=false`
+- `DEBUG_LEVEL=0`
+
+**Limitations**:
+- IPv6 rotation (`rotate_ipv6`, `ipv6_subnet`, pool settings) is only configurable via `config.yaml`.
+
 ## Complete Example
 
 ```yaml
@@ -274,6 +344,13 @@ network:
   interface_name: "eth0"
   ipv4_enabled: true
   ipv6_enabled: true
+
+  # IPv6 rotation (optional)
+  rotate_ipv6: false
+  ipv6_subnet: ""
+  ipv6_pool_size: 200
+  ipv6_max_usage: 100
+  ipv6_max_age: 30
 
 monitoring:
   enabled: true
@@ -291,12 +368,7 @@ NyxProxy-OSS looks for `config.yaml` in the following order:
 1. Current working directory
 2. Falls back to environment variables
 
-You can also specify a custom location:
-
-```bash
-# Not yet implemented, but planned for future releases
-./nyxproxy --config /path/to/config.yaml
-```
+Custom config file paths/flags (for example `--config`) are not implemented. To run with a different config, start the process in a different working directory (or adjust your systemd `WorkingDirectory=`).
 
 ## Security Best Practices
 

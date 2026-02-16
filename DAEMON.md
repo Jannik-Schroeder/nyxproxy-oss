@@ -272,9 +272,13 @@ Error: failed to load config: open config.yaml: no such file or directory
 # Make sure config.yaml exists in WorkingDirectory
 ls -la /root/config.yaml
 
-# Or create it
+# Or create it from the example config
 cd /root
-./nyxproxy-setup
+cp config.example.yaml config.yaml
+nano config.yaml
+
+# Then restart
+sudo systemctl restart nyxproxy
 ```
 
 #### 2. Binary not found
@@ -458,33 +462,12 @@ sudo systemctl restart nyxproxy
 
 ---
 
-### Auto-Restart on Config Change
+### Reloading Configuration
 
-Automatically restart when config.yaml changes:
+NyxProxy does not hot-reload `config.yaml`. After changing the config, restart the service:
 
 ```bash
-sudo nano /etc/systemd/system/nyxproxy.service
-
-# Add under [Service]:
-ExecReload=/bin/kill -HUP $MAINPID
-Restart=always
-RestartSec=5
-
-# Add a path unit
-sudo tee /etc/systemd/system/nyxproxy-config.path <<'EOF'
-[Unit]
-Description=Watch NyxProxy config file
-
-[Path]
-PathChanged=/root/config.yaml
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-# Enable path unit
-sudo systemctl enable nyxproxy-config.path
-sudo systemctl start nyxproxy-config.path
+sudo systemctl restart nyxproxy
 ```
 
 ---

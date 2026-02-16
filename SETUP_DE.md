@@ -82,7 +82,7 @@ network:
 cd ..
 
 # Bauen
-go build -o nyxproxy cmd/nyxproxy/main.go
+go build -o nyxproxy ./cmd/proxy
 
 # Starten
 ./nyxproxy
@@ -288,16 +288,17 @@ apt update
 apt install -y golang-go git
 
 # 3. NyxProxy klonen
-git clone https://github.com/yourusername/nyxproxy-core.git
-cd nyxproxy-core
+git clone https://github.com/jannik-schroeder/nyxproxy-oss.git
+cd nyxproxy-oss
 
 # 4. Quick-Setup
 chmod +x scripts/quick-setup.sh
-./scripts/quick-setup.sh
 
-# 5. Bauen und starten
-go build -o nyxproxy cmd/nyxproxy/main.go
-./nyxproxy
+# (benoetigt root)
+sudo ./scripts/quick-setup.sh
+
+# 5. Starten
+sudo ./nyxproxy
 ```
 
 ### Szenario 2: Bereits laufender Server mit Config
@@ -384,8 +385,8 @@ Requires=ndppd.service
 [Service]
 Type=simple
 User=root
-WorkingDirectory=/root/nyxproxy-core
-ExecStart=/root/nyxproxy-core/nyxproxy
+WorkingDirectory=/root/nyxproxy-oss
+ExecStart=/root/nyxproxy-oss/nyxproxy
 Restart=on-failure
 RestartSec=10
 
