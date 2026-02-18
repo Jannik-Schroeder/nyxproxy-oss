@@ -2,6 +2,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Go Version](https://img.shields.io/badge/Go-1.21+-00ADD8?logo=go)](https://go.dev/)
+[![CI](https://github.com/jannik-schroeder/nyxproxy-oss/actions/workflows/ci.yml/badge.svg)](https://github.com/jannik-schroeder/nyxproxy-oss/actions/workflows/ci.yml)
 [![Latest Release](https://img.shields.io/github/v/release/jannik-schroeder/nyxproxy-oss)](https://github.com/jannik-schroeder/nyxproxy-oss/releases)
 
 **High-Performance Proxy Server with Automatic IPv6 Rotation** - Get a new IPv6 address for every request from your own /64 subnet!

@@ -46,3 +46,6 @@ Thumbs.db
 # Build artifacts
 dist/
 build/
+
+# Local caches
+.cache/

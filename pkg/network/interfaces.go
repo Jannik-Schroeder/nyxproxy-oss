@@ -7,12 +7,12 @@ import (
 
 // InterfaceInfo contains information about a network interface
 type InterfaceInfo struct {
-	Name         string
-	Index        int
+	Name          string
+	Index         int
 	IPv4Addresses []string
 	IPv6Addresses []string
-	IsUp         bool
-	IsLoopback   bool
+	IsUp          bool
+	IsLoopback    bool
 }
 
 // GetAllInterfaces returns all network interfaces on the system

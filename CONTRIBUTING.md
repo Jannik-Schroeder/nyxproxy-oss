@@ -51,7 +51,11 @@ Feature requests are welcome! Please:
 
 4. **Test Your Changes**
    ```bash
-   go build ./cmd/proxy
+   gofmt -w .
+   go vet ./...
+   go test ./...
+
+   go build -o nyxproxy ./cmd/proxy
    ./nyxproxy
    ```
 

@@ -15,21 +15,29 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Set up Go
-        uses: actions/setup-go@v4
+        uses: actions/setup-go@v5
         with:
           go-version-file: "go.mod"
+          cache: true
 
       - name: Download dependencies
         run: go mod download
+
+      - name: Test
+        run: go test ./...
+
+      - name: Vet
+        run: go vet ./...
 
       - name: Build for Linux
         env:
           VERSION: ${{ github.ref_name }}
           COMMIT: ${{ github.sha }}
-          BUILD_TIME: ${{ github.event.repository.updated_at }}
         run: |
           # Create dist directory
           mkdir -p dist
+
+          BUILD_TIME="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
           # Build flags
           BUILD_FLAGS="-X github.com/jannik-schroeder/nyxproxy-oss/pkg/version.Version=${VERSION#v}"
@@ -37,19 +45,23 @@ jobs:
           BUILD_FLAGS="${BUILD_FLAGS} -X github.com/jannik-schroeder/nyxproxy-oss/pkg/version.BuildTime=${BUILD_TIME}"
 
           # Build proxy for Linux (both amd64 and arm64)
-          GOOS=linux GOARCH=amd64 go build -ldflags "${BUILD_FLAGS}" -o dist/nyxproxy-linux-amd64 ./cmd/proxy
-          GOOS=linux GOARCH=arm64 go build -ldflags "${BUILD_FLAGS}" -o dist/nyxproxy-linux-arm64 ./cmd/proxy
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "${BUILD_FLAGS}" -o dist/nyxproxy-linux-amd64 ./cmd/proxy
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags "${BUILD_FLAGS}" -o dist/nyxproxy-linux-arm64 ./cmd/proxy
 
           # Copy example config and setup script
           cp config.example.yaml dist/
           cp scripts/quick-setup.sh dist/
 
+          # Create checksums
+          (cd dist && sha256sum * > sha256sums.txt)
+
       - name: Create Release
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v2
         with:
           files: |
             dist/nyxproxy-linux-amd64
             dist/nyxproxy-linux-arm64
             dist/config.example.yaml
             dist/quick-setup.sh
+            dist/sha256sums.txt
           generate_release_notes: true
